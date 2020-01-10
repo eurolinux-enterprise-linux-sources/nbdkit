@@ -1,5 +1,5 @@
 /* nbdkit
- * Copyright (C) 2013-2017 Red Hat Inc.
+ * Copyright (C) 2013-2018 Red Hat Inc.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -39,18 +39,45 @@
 #include <inttypes.h>
 #include <string.h>
 #include <unistd.h>
+#include <dlfcn.h>
 
 #include <nbdkit-plugin.h>
 
-#include <vixDiskLib.h>
+#include "isaligned.h"
 
+#include "vddk-structs.h"
+
+/* Enable extra disk info debugging with: -D vddk.diskinfo=1 */
+int vddk_debug_diskinfo;
+
+/* The VDDK APIs that we call.  These globals are initialized when the
+ * plugin is loaded (by vddk_load).
+ */
+static char *(*VixDiskLib_GetErrorText) (VixError err, const char *unused);
+static void (*VixDiskLib_FreeErrorText) (char *text);
+static VixError (*VixDiskLib_InitEx) (uint32_t major, uint32_t minor, VixDiskLibGenericLogFunc *log_function, VixDiskLibGenericLogFunc *warn_function, VixDiskLibGenericLogFunc *panic_function, const char *lib_dir, const char *config_file);
+static void (*VixDiskLib_Exit) (void);
+static VixError (*VixDiskLib_ConnectEx) (const VixDiskLibConnectParams *params, char read_only, const char *snapshot_ref, const char *transport_modes, VixDiskLibConnection *connection);
+static VixError (*VixDiskLib_Open) (const VixDiskLibConnection connection, const char *path, uint32_t flags, VixDiskLibHandle *handle);
+static const char *(*VixDiskLib_GetTransportMode) (VixDiskLibHandle handle);
+static VixError (*VixDiskLib_Close) (VixDiskLibHandle handle);
+static VixError (*VixDiskLib_Disconnect) (VixDiskLibConnection connection);
+static VixError (*VixDiskLib_GetInfo) (VixDiskLibHandle handle, VixDiskLibInfo **info);
+static void (*VixDiskLib_FreeInfo) (VixDiskLibInfo *info);
+static VixError (*VixDiskLib_Read) (VixDiskLibHandle handle, uint64_t start_sector, uint64_t nr_sectors, unsigned char *buf);
+static VixError (*VixDiskLib_Write) (VixDiskLibHandle handle, uint64_t start_sector, uint64_t nr_sectors, const unsigned char *buf);
+
+/* Parameters passed to InitEx. */
 #define VDDK_MAJOR 5
 #define VDDK_MINOR 1
+
+static void *dl = NULL;                    /* dlopen handle */
+static int init_called = 0;                /* was InitEx called */
 
 static char *config = NULL;                /* config */
 static const char *cookie = NULL;          /* cookie */
 static const char *filename = NULL;        /* file */
-static const char *libdir = VDDK_LIBDIR;   /* libdir */
+static char *libdir = NULL;                /* libdir */
 static int nfc_host_port = 0;              /* nfchostport */
 static char *password = NULL;              /* password */
 static int port = 0;                       /* port */
@@ -59,7 +86,6 @@ static const char *snapshot_moref = NULL;  /* snapshot */
 static const char *thumb_print = NULL;     /* thumbprint */
 static const char *transport_modes = NULL; /* transports */
 static const char *username = NULL;        /* user */
-static const char *vim_api_ver = NULL;     /* vimapiver */
 static const char *vmx_spec = NULL;        /* vm */
 static int is_remote = 0;
 
@@ -121,28 +147,45 @@ error_function (const char *fs, va_list args)
 static void
 vddk_load (void)
 {
-  VixError err;
+  static const char soname[] = "libvixDiskLib.so.6";
 
-  DEBUG_CALL ("VixDiskLib_InitEx",
-              "%d, %d, &debug_fn, &error_fn, &error_fn, %s, %s",
-              VDDK_MAJOR, VDDK_MINOR, libdir, config ? : "NULL");
-  err = VixDiskLib_InitEx (VDDK_MAJOR, VDDK_MINOR,
-                           &debug_function, /* log function */
-                           &error_function, /* warn function */
-                           &error_function, /* panic function */
-                           libdir, config);
-  if (err != VIX_OK) {
-    VDDK_ERROR (err, "VixDiskLib_InitEx");
+  /* Load the plugin and set the entry points. */
+  dl = dlopen (soname, RTLD_NOW);
+  if (dl == NULL) {
+    nbdkit_error ("%s\n\n"
+                  "If '%s' is located on a non-standard path you may need to\n"
+                  "set $LD_LIBRARY_PATH or edit /etc/ld.so.conf.\n\n"
+                  "See the nbdkit-vddk-plugin(1) man page for details.",
+                  dlerror (), soname);
     exit (EXIT_FAILURE);
   }
+
+  VixDiskLib_GetErrorText = dlsym (dl, "VixDiskLib_GetErrorText");
+  VixDiskLib_FreeErrorText = dlsym (dl, "VixDiskLib_FreeErrorText");
+  VixDiskLib_InitEx = dlsym (dl, "VixDiskLib_InitEx");
+  VixDiskLib_Exit = dlsym (dl, "VixDiskLib_Exit");
+  VixDiskLib_ConnectEx = dlsym (dl, "VixDiskLib_ConnectEx");
+  VixDiskLib_Open = dlsym (dl, "VixDiskLib_Open");
+  VixDiskLib_GetTransportMode = dlsym (dl, "VixDiskLib_GetTransportMode");
+  VixDiskLib_Close = dlsym (dl, "VixDiskLib_Close");
+  VixDiskLib_Disconnect = dlsym (dl, "VixDiskLib_Disconnect");
+  VixDiskLib_GetInfo = dlsym (dl, "VixDiskLib_GetInfo");
+  VixDiskLib_FreeInfo = dlsym (dl, "VixDiskLib_FreeInfo");
+  VixDiskLib_Read = dlsym (dl, "VixDiskLib_Read");
+  VixDiskLib_Write = dlsym (dl, "VixDiskLib_Write");
 }
 
 static void
 vddk_unload (void)
 {
-  DEBUG_CALL ("VixDiskLib_Exit", "");
-  VixDiskLib_Exit ();
+  if (init_called) {
+    DEBUG_CALL ("VixDiskLib_Exit", "");
+    VixDiskLib_Exit ();
+  }
+  if (dl)
+    dlclose (dl);
   free (config);
+  free (libdir);
   free (password);
 }
 
@@ -153,7 +196,7 @@ vddk_config (const char *key, const char *value)
   if (strcmp (key, "config") == 0) {
     /* See FILENAMES AND PATHS in nbdkit-plugin(3). */
     free (config);
-    config = nbdkit_absolute_path (value);
+    config = nbdkit_realpath (value);
     if (!config)
       return -1;
   }
@@ -168,18 +211,17 @@ vddk_config (const char *key, const char *value)
     filename = value;
   }
   else if (strcmp (key, "libdir") == 0) {
-    libdir = value;
+    /* See FILENAMES AND PATHS in nbdkit-plugin(3). */
+    free (libdir);
+    libdir = nbdkit_realpath (value);
+    if (!libdir)
+      return -1;
   }
   else if (strcmp (key, "nfchostport") == 0) {
-#if HAVE_VIXDISKLIBCONNECTPARAMS_NFCHOSTPORT
     if (sscanf (value, "%d", &nfc_host_port) != 1) {
       nbdkit_error ("cannot parse nfchostport: %s", value);
       return -1;
     }
-#else
-    nbdkit_error ("this version of VDDK is too old to support nfchostpost");
-    return -1;
-#endif
   }
   else if (strcmp (key, "password") == 0) {
     free (password);
@@ -208,12 +250,7 @@ vddk_config (const char *key, const char *value)
     username = value;
   }
   else if (strcmp (key, "vimapiver") == 0) {
-#if HAVE_VIXDISKLIBCONNECTPARAMS_VIMAPIVER
-    vim_api_ver = value;
-#else
-    nbdkit_error ("this version of VDDK is too old to support vimapiver");
-    return -1;
-#endif
+    /* Ignored for backwards compatibility. */
   }
   else if (strcmp (key, "vm") == 0) {
     vmx_spec = value;
@@ -229,6 +266,8 @@ vddk_config (const char *key, const char *value)
 static int
 vddk_config_complete (void)
 {
+  VixError err;
+
   if (filename == NULL) {
     nbdkit_error ("you must supply the file=<FILENAME> parameter after the plugin name on the command line");
     return -1;
@@ -248,8 +287,7 @@ vddk_config_complete (void)
     cookie ||
     thumb_print ||
     port ||
-    nfc_host_port ||
-    vim_api_ver;
+    nfc_host_port;
 
   if (is_remote) {
 #define missing(test, param)                                            \
@@ -265,6 +303,22 @@ vddk_config_complete (void)
 #undef missing
   }
 
+  /* Initialize VDDK library. */
+  DEBUG_CALL ("VixDiskLib_InitEx",
+              "%d, %d, &debug_fn, &error_fn, &error_fn, %s, %s",
+              VDDK_MAJOR, VDDK_MINOR,
+              libdir ? : VDDK_LIBDIR, config ? : "NULL");
+  err = VixDiskLib_InitEx (VDDK_MAJOR, VDDK_MINOR,
+                           &debug_function, /* log function */
+                           &error_function, /* warn function */
+                           &error_function, /* panic function */
+                           libdir ? : VDDK_LIBDIR, config);
+  if (err != VIX_OK) {
+    VDDK_ERROR (err, "VixDiskLib_InitEx");
+    exit (EXIT_FAILURE);
+  }
+  init_called = 1;
+
   return 0;
 }
 
@@ -276,18 +330,24 @@ static void
 vddk_dump_plugin (void)
 {
   printf ("vddk_default_libdir=%s\n", VDDK_LIBDIR);
-
-#if HAVE_VIXDISKLIBCONNECTPARAMS_NFCHOSTPORT
   printf ("vddk_has_nfchostport=1\n");
-#endif
 
-#if HAVE_VIXDISKLIBCONNECTPARAMS_VIMAPIVER
-  printf ("vddk_has_vimapiver=1\n");
-#endif
-
-  /* XXX We really need to print the version of the dynamically
-   * linked library here, but VDDK does not provide it.
+#if defined(HAVE_DLADDR)
+  /* It would be nice to print the version of VDDK from the shared
+   * library, but VDDK does not provide it.  Instead we can get the
+   * path to the library using the glibc extension dladdr, and then
+   * resolve symlinks using realpath.  The final pathname should
+   * contain the version number.
    */
+  Dl_info info;
+  char *p;
+  if (dladdr (VixDiskLib_InitEx, &info) != 0 &&
+      info.dli_fname != NULL &&
+      (p = nbdkit_realpath (info.dli_fname)) != NULL) {
+    printf ("vddk_dll=%s\n", p);
+    free (p);
+  }
+#endif
 }
 
 /* XXX To really do threading correctly in accordance with the VDDK
@@ -334,17 +394,13 @@ vddk_open (int readonly)
     }
     params.thumbPrint = (char *) thumb_print;
     params.port = port;
-#if HAVE_VIXDISKLIBCONNECTPARAMS_NFCHOSTPORT
     params.nfcHostPort = nfc_host_port;
-#endif
-#if HAVE_VIXDISKLIBCONNECTPARAMS_VIMAPIVER
-    params.vimApiVer = (char *) vim_api_ver;
-#endif
   }
 
   /* XXX Some documentation suggests we should call
-   * VixDiskLib_PrepareForAccess here.  However we need the true VM
-   * name to do that.
+   * VixDiskLib_PrepareForAccess here.  It may be required for
+   * Advanced Transport modes, but I could not make it work with
+   * either ESXi or vCenter servers.
    */
 
   DEBUG_CALL ("VixDiskLib_ConnectEx",
@@ -418,6 +474,26 @@ vddk_get_size (void *handle)
 
   size = info->capacity * (uint64_t)VIXDISKLIB_SECTOR_SIZE;
 
+  if (vddk_debug_diskinfo) {
+    nbdkit_debug ("disk info: capacity: %" PRIu64 " (size: %" PRIi64 ")",
+                  info->capacity, size);
+    nbdkit_debug ("disk info: biosGeo: C:%" PRIu32 " H:%" PRIu32 " S:%" PRIu32,
+                  info->biosGeo.cylinders,
+                  info->biosGeo.heads,
+                  info->biosGeo.sectors);
+    nbdkit_debug ("disk info: physGeo: C:%" PRIu32 " H:%" PRIu32 " S:%" PRIu32,
+                  info->physGeo.cylinders,
+                  info->physGeo.heads,
+                  info->physGeo.sectors);
+    nbdkit_debug ("disk info: adapter type: %d",
+                  (int) info->adapterType);
+    nbdkit_debug ("disk info: num links: %d", info->numLinks);
+    nbdkit_debug ("disk info: parent filename hint: %s",
+                  info->parentFileNameHint ? : "NULL");
+    nbdkit_debug ("disk info: uuid: %s",
+                  info->uuid ? : "NULL");
+  }
+
   DEBUG_CALL ("VixDiskLib_FreeInfo", "info");
   VixDiskLib_FreeInfo (info);
 
@@ -435,11 +511,11 @@ vddk_pread (void *handle, void *buf, uint32_t count, uint64_t offset)
   VixError err;
 
   /* Align to sectors. */
-  if ((offset & (VIXDISKLIB_SECTOR_SIZE-1)) != 0) {
+  if (!IS_ALIGNED (offset, VIXDISKLIB_SECTOR_SIZE)) {
     nbdkit_error ("read is not aligned to sectors");
     return -1;
   }
-  if ((count & (VIXDISKLIB_SECTOR_SIZE-1)) != 0) {
+  if (!IS_ALIGNED (count, VIXDISKLIB_SECTOR_SIZE)) {
     nbdkit_error ("read is not aligned to sectors");
     return -1;
   }
@@ -468,11 +544,11 @@ vddk_pwrite (void *handle, const void *buf, uint32_t count, uint64_t offset)
   VixError err;
 
   /* Align to sectors. */
-  if ((offset & (VIXDISKLIB_SECTOR_SIZE-1)) != 0) {
+  if (!IS_ALIGNED (offset, VIXDISKLIB_SECTOR_SIZE)) {
     nbdkit_error ("read is not aligned to sectors");
     return -1;
   }
-  if ((count & (VIXDISKLIB_SECTOR_SIZE-1)) != 0) {
+  if (!IS_ALIGNED (count, VIXDISKLIB_SECTOR_SIZE)) {
     nbdkit_error ("read is not aligned to sectors");
     return -1;
   }

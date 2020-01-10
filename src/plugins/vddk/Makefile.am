@@ -1,5 +1,5 @@
 # nbdkit
-# Copyright (C) 2013 Red Hat Inc.
+# Copyright (C) 2013-2018 Red Hat Inc.
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
@@ -30,13 +30,11 @@
 # OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 # SUCH DAMAGE.
 
+include $(top_srcdir)/common-rules.mk
+
 EXTRA_DIST = \
 	nbdkit-vddk-plugin.pod \
 	README.VDDK
-
-CLEANFILES = *~
-
-plugindir = $(libdir)/nbdkit/plugins
 
 if HAVE_VDDK
 
@@ -44,28 +42,30 @@ plugin_LTLIBRARIES = nbdkit-vddk-plugin.la
 
 nbdkit_vddk_plugin_la_SOURCES = \
 	vddk.c \
+	vddk-structs.h \
 	$(top_srcdir)/include/nbdkit-plugin.h
 
 nbdkit_vddk_plugin_la_CPPFLAGS = \
-	-I$(top_srcdir)/include
+	-I$(top_srcdir)/include \
+	-I$(top_srcdir)/common/include \
+	-DVDDK_LIBDIR=\"$(libdir)/vmware-vix-disklib\"
 nbdkit_vddk_plugin_la_CFLAGS = \
-	$(WARNINGS_CFLAGS) \
-	$(VDDK_CFLAGS)
+	$(WARNINGS_CFLAGS)
 nbdkit_vddk_plugin_la_LIBADD = \
-	$(VDDK_LIBS)
+	$(DL_LIBS)
 nbdkit_vddk_plugin_la_LDFLAGS = \
 	-module -avoid-version -shared
 
-if HAVE_POD2MAN
+if HAVE_POD
 
 man_MANS = nbdkit-vddk-plugin.1
 CLEANFILES += $(man_MANS)
 
 nbdkit-vddk-plugin.1: nbdkit-vddk-plugin.pod
-	$(POD2MAN) $(POD2MAN_ARGS) --section=1 --name=`basename $@ .1` $< $@.t && \
-	if grep 'POD ERROR' $@.t; then rm $@.t; exit 1; fi && \
-	mv $@.t $@
+	$(PODWRAPPER) --section=1 --man $@ \
+	    --html $(top_builddir)/html/$@.html \
+	    $<
 
-endif
+endif HAVE_POD
 
-endif
+endif HAVE_VDDK

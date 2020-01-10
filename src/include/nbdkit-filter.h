@@ -1,5 +1,5 @@
 /* nbdkit
- * Copyright (C) 2013-2017 Red Hat Inc.
+ * Copyright (C) 2013-2018 Red Hat Inc.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -42,7 +42,7 @@
 extern "C" {
 #endif
 
-#define NBDKIT_FILTER_API_VERSION 1
+#define NBDKIT_FILTER_API_VERSION 2
 
 typedef int nbdkit_next_config (void *nxdata,
                                 const char *key, const char *value);
@@ -57,26 +57,32 @@ struct nbdkit_next_ops {
   int (*can_flush) (void *nxdata);
   int (*is_rotational) (void *nxdata);
   int (*can_trim) (void *nxdata);
+  int (*can_zero) (void *nxdata);
+  int (*can_fua) (void *nxdata);
 
-  int (*pread) (void *nxdata, void *buf, uint32_t count, uint64_t offset);
+  int (*pread) (void *nxdata, void *buf, uint32_t count, uint64_t offset,
+                uint32_t flags, int *err);
   int (*pwrite) (void *nxdata,
-                 const void *buf, uint32_t count, uint64_t offset);
-  int (*flush) (void *nxdata);
-  int (*trim) (void *nxdata, uint32_t count, uint64_t offset);
-  int (*zero) (void *nxdata, uint32_t count, uint64_t offset, int may_trim);
+                 const void *buf, uint32_t count, uint64_t offset,
+                 uint32_t flags, int *err);
+  int (*flush) (void *nxdata, uint32_t flags, int *err);
+  int (*trim) (void *nxdata, uint32_t count, uint64_t offset, uint32_t flags,
+               int *err);
+  int (*zero) (void *nxdata, uint32_t count, uint64_t offset, uint32_t flags,
+               int *err);
 };
 
 struct nbdkit_filter {
   /* Do not set these fields directly; use NBDKIT_REGISTER_FILTER.
-   * They exist so that we can support filters compiled against
+   * They exist so that we can diagnose filters compiled against
    * one version of the header with a runtime compiled against a
-   * different version with more (or fewer) fields.
+   * different version.
    */
-  uint64_t _struct_size;
   int _api_version;
   int _thread_model;
 
-  /* New fields will only be added at the end of the struct. */
+  /* Because there is no ABI guarantee, new fields may be added
+   * where logically appropriate.  */
   const char *name;
   const char *longname;
   const char *version;
@@ -111,18 +117,26 @@ struct nbdkit_filter {
                         void *handle);
   int (*can_trim) (struct nbdkit_next_ops *next_ops, void *nxdata,
                    void *handle);
+  int (*can_zero) (struct nbdkit_next_ops *next_ops, void *nxdata,
+                   void *handle);
+  int (*can_fua) (struct nbdkit_next_ops *next_ops, void *nxdata,
+                  void *handle);
 
   int (*pread) (struct nbdkit_next_ops *next_ops, void *nxdata,
-                void *handle, void *buf, uint32_t count, uint64_t offset);
+                void *handle, void *buf, uint32_t count, uint64_t offset,
+                uint32_t flags, int *err);
   int (*pwrite) (struct nbdkit_next_ops *next_ops, void *nxdata,
                  void *handle,
-                 const void *buf, uint32_t count, uint64_t offset);
+                 const void *buf, uint32_t count, uint64_t offset,
+                 uint32_t flags, int *err);
   int (*flush) (struct nbdkit_next_ops *next_ops, void *nxdata,
-                void *handle);
+                void *handle, uint32_t flags, int *err);
   int (*trim) (struct nbdkit_next_ops *next_ops, void *nxdata,
-               void *handle, uint32_t count, uint64_t offset);
+               void *handle, uint32_t count, uint64_t offset, uint32_t flags,
+               int *err);
   int (*zero) (struct nbdkit_next_ops *next_ops, void *nxdata,
-               void *handle, uint32_t count, uint64_t offset, int may_trim);
+               void *handle, uint32_t count, uint64_t offset, uint32_t flags,
+               int *err);
 };
 
 #define NBDKIT_REGISTER_FILTER(filter)                                  \
@@ -130,7 +144,6 @@ struct nbdkit_filter {
   struct nbdkit_filter *                                                \
   filter_init (void)                                                    \
   {                                                                     \
-    (filter)._struct_size = sizeof (filter);                            \
     (filter)._api_version = NBDKIT_FILTER_API_VERSION;                  \
     (filter)._thread_model = THREAD_MODEL;                              \
     return &(filter);                                                   \

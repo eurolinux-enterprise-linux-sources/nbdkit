@@ -1,5 +1,5 @@
 # nbdkit
-# Copyright (C) 2013-2017 Red Hat Inc.
+# Copyright (C) 2013-2018 Red Hat Inc.
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
@@ -30,34 +30,46 @@
 # OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 # SUCH DAMAGE.
 
+include $(top_srcdir)/common-rules.mk
+
 ACLOCAL_AMFLAGS = -I m4
 
 EXTRA_DIST = \
 	.dir-locals.el \
 	.gitignore \
+	html/pod.css \
 	LICENSE \
 	nbdkit.in \
 	OTHER_PLUGINS \
 	valgrind-suppressions \
 	m4/.gitignore
 
+CLEANFILES += html/*.html
+
 noinst_SCRIPTS = nbdkit
 
 SUBDIRS = \
+	bash \
 	docs \
 	include \
+	common/include \
 	src
 
 if HAVE_PLUGINS
-SUBDIRS += plugins filters
+SUBDIRS += \
+	common/regions \
+	common/sparse \
+	plugins \
+	filters
 endif
 
 SUBDIRS += tests
 
-CLEANFILES = *~
-
 check-valgrind:
 	$(MAKE) -C tests check-valgrind
+
+check-root:
+	$(MAKE) -C tests check-root
 
 # Maintainer only: check no files are missing from EXTRA_DIST rules,
 # and that all generated files have been included in the tarball.

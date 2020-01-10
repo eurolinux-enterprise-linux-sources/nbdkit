@@ -1,0 +1,55 @@
+=head1 NAME
+
+nbdkit-random-plugin - plugin to serve random data
+
+=head1 SYNOPSIS
+
+ nbdkit random size=SIZE [seed=SEED]
+
+=head1 DESCRIPTION
+
+C<nbdkit-random-plugin> is a plugin for L<nbdkit(1)> which serves
+random data, read only.
+
+The size of the virtual disk must be specified using the C<size>
+parameter.  If you specify the C<seed> parameter then you will get the
+same random data over multiple runs with the same seed.
+
+The random data is generated using an I<in>secure method (a Linear
+Congruential Generator).  This plugin is mainly good for testing NBD
+clients.
+
+=head1 PARAMETERS
+
+=over 4
+
+=item B<size=>SIZE
+
+Specify the virtual size of the disk image.
+
+This parameter is required.
+
+=item B<seed=>SEED
+
+Specify the random seed to get repeatable data over multiple runs.
+
+If not specified then a random seed is chosen.
+
+=back
+
+=head1 SEE ALSO
+
+L<nbdkit(1)>,
+L<nbdkit-plugin(3)>,
+L<nbdkit-data-plugin(1)>,
+L<nbdkit-null-plugin(1)>,
+L<nbdkit-pattern-plugin(1)>,
+L<nbdkit-zero-plugin(1)>.
+
+=head1 AUTHORS
+
+Richard W.M. Jones
+
+=head1 COPYRIGHT
+
+Copyright (C) 2018 Red Hat Inc.

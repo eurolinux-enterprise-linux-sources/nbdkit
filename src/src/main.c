@@ -1,5 +1,5 @@
 /* nbdkit
- * Copyright (C) 2013-2017 Red Hat Inc.
+ * Copyright (C) 2013-2018 Red Hat Inc.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -48,17 +48,14 @@
 #include <sys/wait.h>
 #include <errno.h>
 #include <assert.h>
-
-#ifdef HAVE_SYS_PRCTL_H
-#include <sys/prctl.h>
-#endif
+#include <syslog.h>
 
 #include <pthread.h>
 
 #include <dlfcn.h>
 
-#include "nbdkit-plugin.h"
 #include "internal.h"
+#include "exit-with-parent.h"
 
 #define FIRST_SOCKET_ACTIVATION_FD 3 /* defined by systemd ABI */
 
@@ -75,12 +72,15 @@ static void fork_into_background (void);
 static uid_t parseuser (const char *);
 static gid_t parsegroup (const char *);
 static unsigned int get_socket_activation (void);
+static int is_config_key (const char *key, size_t len);
 
+struct debug_flag *debug_flags; /* -D */
 int exit_with_parent;           /* --exit-with-parent */
 const char *exportname;         /* -e */
 int foreground;                 /* -f */
 const char *ipaddr;             /* -i */
-int newstyle;                   /* -n */
+enum log_to log_to = LOG_TO_DEFAULT; /* --log */
+int newstyle = 1;               /* 0 = -o, 1 = -n */
 char *pidfile;                  /* -P */
 const char *port;               /* -p */
 int readonly;                   /* -r */
@@ -90,6 +90,7 @@ const char *selinux_label;      /* --selinux-label */
 int threads;                    /* -t */
 int tls;                        /* --tls : 0=off 1=on 2=require */
 const char *tls_certificates_dir; /* --tls-certificates */
+const char *tls_psk;            /* --tls-psk */
 int tls_verify_peer;            /* --tls-verify-peer */
 char *unixsocket;               /* -U */
 const char *user, *group;       /* -u & -g */
@@ -104,66 +105,84 @@ volatile int quit;
 int quit_fd;
 static int write_quit_fd;
 
+/* True if we forked into the background (used to control log messages). */
+int forked_into_background;
+
 /* The currently loaded plugin. */
 struct backend *backend;
 
 static char *random_fifo_dir = NULL;
 static char *random_fifo = NULL;
 
-enum { HELP_OPTION = CHAR_MAX + 1 };
+enum {
+  HELP_OPTION = CHAR_MAX + 1,
+  DUMP_CONFIG_OPTION,
+  DUMP_PLUGIN_OPTION,
+  EXIT_WITH_PARENT_OPTION,
+  FILTER_OPTION,
+  LOG_OPTION,
+  LONG_OPTIONS_OPTION,
+  RUN_OPTION,
+  SELINUX_LABEL_OPTION,
+  SHORT_OPTIONS_OPTION,
+  TLS_OPTION,
+  TLS_CERTIFICATES_OPTION,
+  TLS_PSK_OPTION,
+  TLS_VERIFY_PEER_OPTION,
+};
 
-static const char *short_options = "e:fg:i:nop:P:rst:u:U:vV";
+static const char *short_options = "D:e:fg:i:nop:P:rst:u:U:vV";
 static const struct option long_options[] = {
-  { "help",       0, NULL, HELP_OPTION },
-  { "dump-config",0, NULL, 0 },
-  { "dump-plugin",0, NULL, 0 },
-  { "exit-with-parent", 0, NULL, 0 },
-  { "export",     1, NULL, 'e' },
-  { "export-name",1, NULL, 'e' },
-  { "exportname", 1, NULL, 'e' },
-  { "filter",     1, NULL, 0 },
-  { "foreground", 0, NULL, 'f' },
-  { "no-fork",    0, NULL, 'f' },
-  { "group",      1, NULL, 'g' },
-  { "ip-addr",    1, NULL, 'i' },
-  { "ipaddr",     1, NULL, 'i' },
-  { "new-style",  0, NULL, 'n' },
-  { "newstyle",   0, NULL, 'n' },
-  { "old-style",  0, NULL, 'o' },
-  { "oldstyle",   0, NULL, 'o' },
-  { "pid-file",   1, NULL, 'P' },
-  { "pidfile",    1, NULL, 'P' },
-  { "port",       1, NULL, 'p' },
-  { "read-only",  0, NULL, 'r' },
-  { "readonly",   0, NULL, 'r' },
-  { "run",        1, NULL, 0 },
-  { "selinux-label", 1, NULL, 0 },
-  { "single",     0, NULL, 's' },
-  { "stdin",      0, NULL, 's' },
-  { "threads",    1, NULL, 't' },
-  { "tls",        1, NULL, 0 },
-  { "tls-certificates", 1, NULL, 0 },
-  { "tls-verify-peer", 0, NULL, 0 },
-  { "unix",       1, NULL, 'U' },
-  { "user",       1, NULL, 'u' },
-  { "verbose",    0, NULL, 'v' },
-  { "version",    0, NULL, 'V' },
+  { "debug",            required_argument, NULL, 'D' },
+  { "dump-config",      no_argument,       NULL, DUMP_CONFIG_OPTION },
+  { "dump-plugin",      no_argument,       NULL, DUMP_PLUGIN_OPTION },
+  { "exit-with-parent", no_argument,       NULL, EXIT_WITH_PARENT_OPTION },
+  { "export",           required_argument, NULL, 'e' },
+  { "export-name",      required_argument, NULL, 'e' },
+  { "exportname",       required_argument, NULL, 'e' },
+  { "filter",           required_argument, NULL, FILTER_OPTION },
+  { "foreground",       no_argument,       NULL, 'f' },
+  { "no-fork",          no_argument,       NULL, 'f' },
+  { "group",            required_argument, NULL, 'g' },
+  { "help",             no_argument,       NULL, HELP_OPTION },
+  { "ip-addr",          required_argument, NULL, 'i' },
+  { "ipaddr",           required_argument, NULL, 'i' },
+  { "log",              required_argument, NULL, LOG_OPTION },
+  { "long-options",     no_argument,       NULL, LONG_OPTIONS_OPTION },
+  { "new-style",        no_argument,       NULL, 'n' },
+  { "newstyle",         no_argument,       NULL, 'n' },
+  { "old-style",        no_argument,       NULL, 'o' },
+  { "oldstyle",         no_argument,       NULL, 'o' },
+  { "pid-file",         required_argument, NULL, 'P' },
+  { "pidfile",          required_argument, NULL, 'P' },
+  { "port",             required_argument, NULL, 'p' },
+  { "read-only",        no_argument,       NULL, 'r' },
+  { "readonly",         no_argument,       NULL, 'r' },
+  { "run",              required_argument, NULL, RUN_OPTION },
+  { "selinux-label",    required_argument, NULL, SELINUX_LABEL_OPTION },
+  { "short-options",    no_argument,       NULL, SHORT_OPTIONS_OPTION },
+  { "single",           no_argument,       NULL, 's' },
+  { "stdin",            no_argument,       NULL, 's' },
+  { "threads",          required_argument, NULL, 't' },
+  { "tls",              required_argument, NULL, TLS_OPTION },
+  { "tls-certificates", required_argument, NULL, TLS_CERTIFICATES_OPTION },
+  { "tls-psk",          required_argument, NULL, TLS_PSK_OPTION },
+  { "tls-verify-peer",  no_argument,       NULL, TLS_VERIFY_PEER_OPTION },
+  { "unix",             required_argument, NULL, 'U' },
+  { "user",             required_argument, NULL, 'u' },
+  { "verbose",          no_argument,       NULL, 'v' },
+  { "version",          no_argument,       NULL, 'V' },
   { NULL },
 };
 
 static void
 usage (void)
 {
-  printf ("nbdkit [--dump-config] [--dump-plugin]\n"
-          "       [-e EXPORTNAME] [--exit-with-parent] [-f]\n"
-          "       [--filter=FILTER ...] [-g GROUP] [-i IPADDR]\n"
-          "       [--newstyle] [--oldstyle] [-P PIDFILE] [-p PORT] [-r]\n"
-          "       [--run CMD] [-s] [--selinux-label LABEL] [-t THREADS]\n"
-          "       [--tls=off|on|require] [--tls-certificates /path/to/certificates]\n"
-          "       [--tls-verify-peer]\n"
-          "       [-U SOCKET] [-u USER] [-v] [-V]\n"
-          "       PLUGIN [key=value [key=value [...]]]\n"
-          "\n"
+  /* --{short,long}-options remain undocumented */
+  printf (
+#include "synopsis.c"
+  );
+  printf ("\n"
           "Please read the nbdkit(1) manual page for full usage.\n");
 }
 
@@ -213,6 +232,7 @@ main (int argc, char *argv[])
     const char *filename;
   } *filter_filenames = NULL;
   size_t i;
+  const char *magic_config_key;
 
   threadlocal_init ();
 
@@ -234,25 +254,72 @@ main (int argc, char *argv[])
       break;
 
     switch (c) {
-    case 0:                     /* options which are long only */
-      if (strcmp (long_options[option_index].name, "dump-config") == 0) {
-        dump_config ();
-        exit (EXIT_SUCCESS);
+    case 'D':
+      {
+        const char *p, *q;
+        struct debug_flag *flag;
+
+        /* Debug Flag must be "NAME.FLAG=N".
+         *                     ^    ^    ^
+         *                optarg    p    q  (after +1 adjustment below)
+         */
+        p = strchr (optarg, '.');
+        q = strchr (optarg, '=');
+        if (p == NULL || q == NULL) {
+        bad_debug_flag:
+          fprintf (stderr,
+                   "%s: -D (Debug Flag) must have the format NAME.FLAG=N\n",
+                   program_name);
+          exit (EXIT_FAILURE);
+        }
+        p++;                    /* +1 adjustment */
+        q++;
+
+        if (p - optarg <= 1) goto bad_debug_flag; /* NAME too short */
+        if (p > q) goto bad_debug_flag;
+        if (q - p <= 1) goto bad_debug_flag; /* FLAG too short */
+        if (*q == '\0') goto bad_debug_flag; /* N too short */
+
+        flag = malloc (sizeof *flag);
+        if (flag == NULL) {
+        debug_flag_perror:
+          perror ("malloc");
+          exit (EXIT_FAILURE);
+        }
+        flag->name = strndup (optarg, p-optarg-1);
+        if (!flag->name) goto debug_flag_perror;
+        flag->flag = strndup (p, q-p-1);
+        if (!flag->flag) goto debug_flag_perror;
+        if (sscanf (q, "%d", &flag->value) != 1) goto bad_debug_flag;
+        flag->used = 0;
+
+        /* Add flag to the linked list. */
+        flag->next = debug_flags;
+        debug_flags = flag;
       }
-      else if (strcmp (long_options[option_index].name, "dump-plugin") == 0) {
-        dump_plugin = 1;
-      }
-      else if (strcmp (long_options[option_index].name, "exit-with-parent") == 0) {
-#ifdef PR_SET_PDEATHSIG
-        exit_with_parent = 1;
-        foreground = 1;
+      break;
+
+    case DUMP_CONFIG_OPTION:
+      dump_config ();
+      exit (EXIT_SUCCESS);
+
+    case DUMP_PLUGIN_OPTION:
+      dump_plugin = 1;
+      break;
+
+    case EXIT_WITH_PARENT_OPTION:
+#ifdef HAVE_EXIT_WITH_PARENT
+      exit_with_parent = 1;
+      foreground = 1;
+      break;
 #else
-        fprintf (stderr, "%s: --exit-with-parent is not implemented for this operating system\n",
-                 program_name);
-        exit (EXIT_FAILURE);
+      fprintf (stderr, "%s: --exit-with-parent is not implemented for this operating system\n",
+               program_name);
+      exit (EXIT_FAILURE);
 #endif
-      }
-      else if (strcmp (long_options[option_index].name, "filter") == 0) {
+
+    case FILTER_OPTION:
+      {
         struct filter_filename *t;
 
         t = malloc (sizeof *t);
@@ -264,49 +331,72 @@ main (int argc, char *argv[])
         t->filename = optarg;
         filter_filenames = t;
       }
-      else if (strcmp (long_options[option_index].name, "run") == 0) {
-        if (socket_activation) {
-          fprintf (stderr, "%s: cannot use socket activation with --run flag\n",
-                   program_name);
-          exit (EXIT_FAILURE);
-        }
-        run = optarg;
-        foreground = 1;
-      }
-      else if (strcmp (long_options[option_index].name, "selinux-label") == 0) {
-        selinux_label = optarg;
-        break;
-      }
-      else if (strcmp (long_options[option_index].name, "tls") == 0) {
-        tls_set_on_cli = 1;
-        if (strcmp (optarg, "off") == 0 || strcmp (optarg, "0") == 0)
-          tls = 0;
-        else if (strcmp (optarg, "on") == 0 || strcmp (optarg, "1") == 0)
-          tls = 1;
-        else if (strcmp (optarg, "require") == 0 ||
-                 strcmp (optarg, "required") == 0 ||
-                 strcmp (optarg, "force") == 0)
-          tls = 2;
-        else {
-          fprintf (stderr, "%s: --tls flag must be off|on|require\n",
-                   program_name);
-          exit (EXIT_FAILURE);
-        }
-        break;
-      }
-      else if (strcmp (long_options[option_index].name, "tls-certificates") == 0) {
-        tls_certificates_dir = optarg;
-        break;
-      }
-      else if (strcmp (long_options[option_index].name, "tls-verify-peer") == 0) {
-        tls_verify_peer = 1;
-        break;
-      }
+      break;
+
+    case LOG_OPTION:
+      if (strcmp (optarg, "stderr") == 0)
+        log_to = LOG_TO_STDERR;
+      else if (strcmp (optarg, "syslog") == 0)
+        log_to = LOG_TO_SYSLOG;
       else {
-        fprintf (stderr, "%s: unknown long option: %s (%d)\n",
-                 program_name, long_options[option_index].name, option_index);
+        fprintf (stderr, "%s: --log must be \"stderr\" or \"syslog\"\n",
+                 program_name);
         exit (EXIT_FAILURE);
       }
+      break;
+
+    case LONG_OPTIONS_OPTION:
+      for (i = 0; long_options[i].name != NULL; ++i) {
+        if (strcmp (long_options[i].name, "long-options") != 0 &&
+            strcmp (long_options[i].name, "short-options") != 0)
+          printf ("--%s\n", long_options[i].name);
+      }
+      exit (EXIT_SUCCESS);
+
+    case RUN_OPTION:
+      if (socket_activation) {
+        fprintf (stderr, "%s: cannot use socket activation with --run flag\n",
+                 program_name);
+        exit (EXIT_FAILURE);
+      }
+      run = optarg;
+      foreground = 1;
+      break;
+
+    case SELINUX_LABEL_OPTION:
+      selinux_label = optarg;
+      break;
+
+    case SHORT_OPTIONS_OPTION:
+      for (i = 0; short_options[i]; ++i) {
+        if (short_options[i] != ':')
+          printf ("-%c\n", short_options[i]);
+      }
+      exit (EXIT_SUCCESS);
+
+    case TLS_OPTION:
+      tls_set_on_cli = 1;
+      if (strcasecmp (optarg, "require") == 0 ||
+          strcasecmp (optarg, "required") == 0 ||
+          strcasecmp (optarg, "force") == 0)
+        tls = 2;
+      else {
+        tls = nbdkit_parse_bool (optarg);
+        if (tls == -1)
+          exit (EXIT_FAILURE);
+      }
+      break;
+
+    case TLS_CERTIFICATES_OPTION:
+      tls_certificates_dir = optarg;
+      break;
+
+    case TLS_PSK_OPTION:
+      tls_psk = optarg;
+      break;
+
+    case TLS_VERIFY_PEER_OPTION:
+      tls_verify_peer = 1;
       break;
 
     case 'e':
@@ -464,6 +554,16 @@ main (int argc, char *argv[])
     exit (EXIT_FAILURE);
   }
 
+  /* Set the umask to a known value.  This makes the behaviour of
+   * plugins when creating files more predictable, and also removes an
+   * implicit dependency on umask when calling mkstemp(3).
+   */
+  umask (0022);
+
+  /* If we will or might use syslog. */
+  if (log_to == LOG_TO_SYSLOG || log_to == LOG_TO_DEFAULT)
+    openlog (program_name, LOG_PID, 0);
+
   /* Initialize TLS. */
   crypto_init (tls_set_on_cli);
   assert (tls != -1);
@@ -471,10 +571,10 @@ main (int argc, char *argv[])
   /* Implement --exit-with-parent early in case plugin initialization
    * takes a long time and the parent exits during that time.
    */
-#ifdef PR_SET_PDEATHSIG
+#ifdef HAVE_EXIT_WITH_PARENT
   if (exit_with_parent) {
-    if (prctl (PR_SET_PDEATHSIG, SIGTERM) == -1) {
-      perror ("prctl: PR_SET_PDEATHSIG");
+    if (set_exit_with_parent () == -1) {
+      perror ("nbdkit: --exit-with-parent");
       exit (EXIT_FAILURE);
     }
   }
@@ -534,6 +634,23 @@ main (int argc, char *argv[])
     filter_filenames = t->next;
     free (t);
   }
+
+  /* Check all debug flags were used, and free them. */
+  while (debug_flags != NULL) {
+    struct debug_flag *next = debug_flags->next;
+
+    if (!debug_flags->used) {
+      fprintf (stderr, "%s: debug flag -D %s.%s was not used\n",
+               program_name, debug_flags->name, debug_flags->flag);
+      exit (EXIT_FAILURE);
+    }
+    free (debug_flags->name);
+    free (debug_flags->flag);
+    free (debug_flags);
+    debug_flags = next;
+  }
+
+  /* Select a thread model. */
   lock_init_thread_model ();
 
   if (help) {
@@ -544,6 +661,7 @@ main (int argc, char *argv[])
       printf ("\n");
       b->usage (b);
     }
+    backend->free (backend);
     exit (EXIT_SUCCESS);
   }
 
@@ -558,40 +676,51 @@ main (int argc, char *argv[])
         printf (" %s", v);
       printf ("\n");
     }
+    backend->free (backend);
     exit (EXIT_SUCCESS);
   }
 
-  /* Find key=value configuration parameters for this plugin.
-   * The first one is magical in that if it doesn't contain '=' then
-   * we assume it is 'script=...'.
+  /* Call config and config_complete to parse the parameters.
+   *
+   * If the plugin provides magic_config_key then any "bare" values
+   * (ones not containing "=") are prefixed with this key.
+   *
+   * For backwards compatibility with old plugins, and to support
+   * scripting languages, if magic_config_key == NULL then if the
+   * first parameter is bare it is prefixed with the key "script", and
+   * any other bare parameters are errors.
    */
-  if (optind < argc && (p = strchr (argv[optind], '=')) == NULL) {
-    backend->config (backend, "script", argv[optind]);
-    ++optind;
+  magic_config_key = backend->magic_config_key (backend);
+  for (i = 0; optind < argc; ++i, ++optind) {
+    p = strchr (argv[optind], '=');
+    if (p && is_config_key (argv[optind], p - argv[optind])) { /* key=value */
+      *p = '\0';
+      backend->config (backend, argv[optind], p+1);
+    }
+    else if (magic_config_key == NULL) {
+      if (i == 0)               /* magic script parameter */
+        backend->config (backend, "script", argv[optind]);
+      else {
+        fprintf (stderr,
+                 "%s: expecting key=value on the command line but got: %s\n",
+                 program_name, argv[optind]);
+        exit (EXIT_FAILURE);
+      }
+    }
+    else {                      /* magic config key */
+      backend->config (backend, magic_config_key, argv[optind]);
+    }
   }
 
-  /* This must run after parsing the possible script parameter so that
-   * the script can be loaded for scripting languages.  Note that all
-   * scripting languages load the script as soon as they see the
-   * script=... parameter (and do not wait for config_complete).
+  /* This must run after parsing the parameters so that the script can
+   * be loaded for scripting languages.  But it must be called before
+   * config_complete so that the plugin doesn't check for missing
+   * parameters.
    */
   if (dump_plugin) {
     backend->dump_fields (backend);
+    backend->free (backend);
     exit (EXIT_SUCCESS);
-  }
-
-  while (optind < argc) {
-    if ((p = strchr (argv[optind], '=')) != NULL) {
-      *p = '\0';
-      backend->config (backend, argv[optind], p+1);
-      ++optind;
-    }
-    else {
-      fprintf (stderr,
-               "%s: expecting key=value on the command line but got: %s\n",
-               program_name, argv[optind]);
-      exit (EXIT_FAILURE);
-    }
   }
 
   backend->config_complete (backend);
@@ -817,7 +946,6 @@ start_serving (void)
   fork_into_background ();
   write_pidfile ();
   accept_incoming_connections (socks, nr_socks);
-
   free_listening_sockets (socks, nr_socks);
 }
 
@@ -827,7 +955,10 @@ handle_quit (int sig)
   char c = sig;
 
   quit = 1;
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-result"
   write (write_quit_fd, &c, 1);
+#pragma GCC diagnostic pop
 }
 
 static void
@@ -936,7 +1067,10 @@ fork_into_background (void)
   if (pid > 0)                  /* Parent process exits. */
     exit (EXIT_SUCCESS);
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-result"
   chdir ("/");
+#pragma GCC diagnostic pop
 
   /* Close stdin/stdout and redirect to /dev/null. */
   close (0);
@@ -948,6 +1082,7 @@ fork_into_background (void)
   if (!verbose)
     dup2 (1, 2);
 
+  forked_into_background = 1;
   debug ("forked into background (new pid = %d)", getpid ());
 }
 
@@ -1145,4 +1280,37 @@ get_socket_activation (void)
   }
 
   return nr_fds;
+}
+
+/* When parsing plugin and filter config key=value from the command
+ * line, check that the key is a simple alphanumeric with period,
+ * underscore or dash.
+ *
+ * Note this doesn't return an error.  If the key is not valid then we
+ * return false and the parsing code will assume that this is a bare
+ * value instead.
+ */
+static int
+is_config_key (const char *key, size_t len)
+{
+  static const char allowed_first[] =
+    "abcdefghijklmnopqrstuvwxyz"
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  static const char allowed[] =
+    "._-"
+    "0123456789"
+    "abcdefghijklmnopqrstuvwxyz"
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+  if (len == 0)
+    return 0;
+
+  if (strchr (allowed_first, key[0]) == NULL)
+    return 0;
+
+  /* This works in context of the caller since key[len] == '='. */
+  if (strspn (key, allowed) != len)
+    return 0;
+
+  return 1;
 }

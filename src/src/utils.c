@@ -1,5 +1,5 @@
 /* nbdkit
- * Copyright (C) 2013 Red Hat Inc.
+ * Copyright (C) 2013-2018 Red Hat Inc.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -40,10 +40,12 @@
 #include <inttypes.h>
 #include <string.h>
 #include <unistd.h>
+#include <limits.h>
 #include <termios.h>
 #include <errno.h>
 
-#include "nbdkit-plugin.h"
+#include "get-current-dir-name.h"
+
 #include "internal.h"
 
 char *
@@ -80,48 +82,104 @@ nbdkit_absolute_path (const char *path)
   return ret;
 }
 
-/* XXX Multiple problems with this function.  Really we should use the
- * 'human*' functions from gnulib.
+/* Parse a string as a size with possible scaling suffix, or return -1
+ * after reporting the error.
  */
 int64_t
 nbdkit_parse_size (const char *str)
 {
   uint64_t size;
-  char t;
+  char *end;
+  uint64_t scale = 1;
 
-  if (sscanf (str, "%" SCNu64 "%c", &size, &t) == 2) {
-    switch (t) {
-    case 'b': case 'B':
-      return (int64_t) size;
-    case 'k': case 'K':
-      return (int64_t) size * 1024;
-    case 'm': case 'M':
-      return (int64_t) size * 1024 * 1024;
-    case 'g': case 'G':
-      return (int64_t) size * 1024 * 1024 * 1024;
-    case 't': case 'T':
-      return (int64_t) size * 1024 * 1024 * 1024 * 1024;
-    case 'p': case 'P':
-      return (int64_t) size * 1024 * 1024 * 1024 * 1024 * 1024;
-    case 'e': case 'E':
-      return (int64_t) size * 1024 * 1024 * 1024 * 1024 * 1024 * 1024;
+  /* Disk sizes cannot usefully exceed off_t (which is signed), so
+   * scan unsigned, then range check later that result fits.  */
+  /* XXX Should we also parse things like '1.5M'? */
+  /* XXX Should we allow hex? If so, hex cannot use scaling suffixes,
+   * because some of them are valid hex digits */
+  errno = 0;
+  size = strtoumax (str, &end, 10);
+  if (errno || str == end) {
+    nbdkit_error ("could not parse size string (%s)", str);
+    return -1;
+  }
+  switch (*end) {
+    /* No suffix */
+  case '\0':
+    end--; /* Safe, since we already filtered out empty string */
+    break;
 
-    case 's': case 'S':         /* "sectors", ie. units of 512 bytes,
-                                 * even if that's not the real sector size
-                                 */
-      return (int64_t) size * 512;
+    /* Powers of 1024 */
+  case 'e': case 'E':
+    scale *= 1024;
+    /* fallthru */
+  case 'p': case 'P':
+    scale *= 1024;
+    /* fallthru */
+  case 't': case 'T':
+    scale *= 1024;
+    /* fallthru */
+  case 'g': case 'G':
+    scale *= 1024;
+    /* fallthru */
+  case 'm': case 'M':
+    scale *= 1024;
+    /* fallthru */
+  case 'k': case 'K':
+    scale *= 1024;
+    /* fallthru */
+  case 'b': case 'B':
+    break;
 
-    default:
-      nbdkit_error ("could not parse size: unknown specifier '%c'", t);
-      return -1;
-    }
+    /* "sectors", ie. units of 512 bytes, even if that's not the real
+     * sector size */
+  case 's': case 'S':
+    scale = 512;
+    break;
+
+  default:
+    nbdkit_error ("could not parse size: unknown suffix '%s'", end);
+    return -1;
   }
 
-  /* bytes */
-  if (sscanf (str, "%" SCNu64, &size) == 1)
-    return (int64_t) size;
+  /* XXX Maybe we should support 'MiB' as a synonym for 'M'; and 'MB'
+   * for powers of 1000, for similarity to GNU tools. But for now,
+   * anything beyond 'M' is dropped.  */
+  if (end[1]) {
+    nbdkit_error ("could not parse size: unknown suffix '%s'", end);
+    return -1;
+  }
 
-  nbdkit_error ("could not parse size string (%s)", str);
+  if (INT64_MAX / scale < size) {
+    nbdkit_error ("overflow computing size (%s)", str);
+    return -1;
+  }
+
+  return size * scale;
+}
+
+/* Parse a string as a boolean, or return -1 after reporting the error.
+ */
+int
+nbdkit_parse_bool (const char *str)
+{
+  if (!strcmp (str, "1") ||
+      !strcasecmp (str, "true") ||
+      !strcasecmp (str, "t") ||
+      !strcasecmp (str, "yes") ||
+      !strcasecmp (str, "y") ||
+      !strcasecmp (str, "on"))
+    return 1;
+
+  if (!strcmp (str, "0") ||
+      !strcasecmp (str, "false") ||
+      !strcasecmp (str, "f") ||
+      !strcasecmp (str, "no") ||
+      !strcasecmp (str, "n") ||
+      !strcasecmp (str, "off"))
+    return 0;
+
+  nbdkit_error ("could not decipher boolean (%s)", str);
   return -1;
 }
 
@@ -196,4 +254,23 @@ nbdkit_read_password (const char *value, char **password)
   }
 
   return 0;
+}
+
+char *
+nbdkit_realpath (const char *path)
+{
+  char *ret;
+
+  if (path == NULL || *path == '\0') {
+    nbdkit_error ("cannot resolve a null or empty path");
+    return NULL;
+  }
+
+  ret = realpath (path, NULL);
+  if (ret == NULL) {
+    nbdkit_error ("realpath: %s: %m", path);
+    return NULL;
+  }
+
+  return ret;
 }

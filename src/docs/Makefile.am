@@ -1,5 +1,5 @@
 # nbdkit
-# Copyright (C) 2013 Red Hat Inc.
+# Copyright (C) 2013-2018 Red Hat Inc.
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
@@ -30,34 +30,90 @@
 # OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 # SUCH DAMAGE.
 
+include $(top_srcdir)/common-rules.mk
+
 EXTRA_DIST = \
+	make-links.sh \
 	nbdkit.pod \
+	nbdkit-captive.pod \
+	nbdkit-probing.pod \
+	nbdkit-protocol.pod \
+	nbdkit-service.pod \
+	nbdkit-tls.pod \
 	nbdkit-plugin.pod \
-	nbdkit-filter.pod
+	nbdkit-filter.pod \
+	synopsis.txt
 
-CLEANFILES = *~
-
-if HAVE_POD2MAN
+if HAVE_POD
 
 man_MANS = \
 	nbdkit.1 \
+	nbdkit-captive.1 \
+	nbdkit-probing.1 \
+	nbdkit-protocol.1 \
+	nbdkit-service.1 \
+	nbdkit-tls.1 \
 	nbdkit-plugin.3 \
 	nbdkit-filter.3
 CLEANFILES += $(man_MANS)
 
-nbdkit.1: nbdkit.pod
-	$(POD2MAN) $(POD2MAN_ARGS) --section=1 --name=nbdkit $< $@.t && \
-	if grep 'POD ERROR' $@.t; then rm $@.t; exit 1; fi && \
-	mv $@.t $@
+nbdkit.1: nbdkit.pod plugin-links.pod filter-links.pod synopsis.txt
+	$(PODWRAPPER) --section=1 --man $@ \
+	    --html $(top_builddir)/html/$@.html \
+	    --insert plugin-links.pod:__PLUGIN_LINKS__ \
+	    --insert filter-links.pod:__FILTER_LINKS__ \
+	    --verbatim synopsis.txt:__SYNOPSIS__ \
+	    $<
 
-nbdkit-plugin.3: nbdkit-plugin.pod
-	$(POD2MAN) $(POD2MAN_ARGS) --section=3 --name=nbdkit-plugin $< $@.t && \
-	if grep 'POD ERROR' $@.t; then rm $@.t; exit 1; fi && \
-	mv $@.t $@
+nbdkit-captive.1: nbdkit-captive.pod
+	$(PODWRAPPER) --section=1 --man $@ \
+	    --html $(top_builddir)/html/$@.html \
+	    $<
 
-nbdkit-filter.3: nbdkit-filter.pod
-	$(POD2MAN) $(POD2MAN_ARGS) --section=3 --name=nbdkit-filter $< $@.t && \
-	if grep 'POD ERROR' $@.t; then rm $@.t; exit 1; fi && \
-	mv $@.t $@
+nbdkit-probing.1: nbdkit-probing.pod
+	$(PODWRAPPER) --section=1 --man $@ \
+	    --html $(top_builddir)/html/$@.html \
+	    $<
 
-endif
+nbdkit-protocol.1: nbdkit-protocol.pod
+	$(PODWRAPPER) --section=1 --man $@ \
+	    --html $(top_builddir)/html/$@.html \
+	    $<
+
+nbdkit-service.1: nbdkit-service.pod
+	$(PODWRAPPER) --section=1 --man $@ \
+	    --html $(top_builddir)/html/$@.html \
+	    $<
+
+nbdkit-tls.1: nbdkit-tls.pod
+	$(PODWRAPPER) --section=1 --man $@ \
+	    --html $(top_builddir)/html/$@.html \
+	    $<
+
+nbdkit-plugin.3: nbdkit-plugin.pod plugin-links.pod
+	$(PODWRAPPER) --section=3 --man $@ \
+	    --html $(top_builddir)/html/$@.html \
+	    --insert plugin-links.pod:__PLUGIN_LINKS__ \
+	    $<
+
+nbdkit-filter.3: nbdkit-filter.pod filter-links.pod
+	$(PODWRAPPER) --section=3 --man $@ \
+	    --html $(top_builddir)/html/$@.html \
+	    --insert filter-links.pod:__FILTER_LINKS__ \
+	    $<
+
+endif HAVE_POD
+
+plugin-links.pod: $(top_srcdir)/common-rules.mk
+	rm -f $@ $@-t
+	$(srcdir)/make-links.sh plugin 1 $(non_lang_plugins) > $@-t
+	echo \; >> $@-t
+	$(srcdir)/make-links.sh plugin 3 $(lang_plugins) >> $@-t
+	mv $@-t $@
+
+filter-links.pod: $(top_srcdir)/common-rules.mk
+	rm -f $@ $@-t
+	$(srcdir)/make-links.sh filter 1 $(filters) > $@-t
+	mv $@-t $@
+
+MAINTAINERCLEANFILES = plugin-links.pod filter-links.pod

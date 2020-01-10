@@ -30,11 +30,9 @@
 # OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 # SUCH DAMAGE.
 
+include $(top_srcdir)/common-rules.mk
+
 EXTRA_DIST = nbdkit-delay-filter.pod
-
-CLEANFILES = *~
-
-filterdir = $(libdir)/nbdkit/filters
 
 filter_LTLIBRARIES = nbdkit-delay-filter.la
 
@@ -49,14 +47,14 @@ nbdkit_delay_filter_la_CFLAGS = \
 nbdkit_delay_filter_la_LDFLAGS = \
 	-module -avoid-version -shared
 
-if HAVE_POD2MAN
+if HAVE_POD
 
 man_MANS = nbdkit-delay-filter.1
 CLEANFILES += $(man_MANS)
 
 nbdkit-delay-filter.1: nbdkit-delay-filter.pod
-	$(POD2MAN) $(POD2MAN_ARGS) --section=1 --name=`basename $@ .1` $< $@.t && \
-	if grep 'POD ERROR' $@.t; then rm $@.t; exit 1; fi && \
-	mv $@.t $@
+	$(PODWRAPPER) --section=1 --man $@ \
+	    --html $(top_builddir)/html/$@.html \
+	    $<
 
-endif
+endif HAVE_POD

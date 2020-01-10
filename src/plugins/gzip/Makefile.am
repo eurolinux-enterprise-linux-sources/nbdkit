@@ -30,11 +30,9 @@
 # OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 # SUCH DAMAGE.
 
+include $(top_srcdir)/common-rules.mk
+
 EXTRA_DIST = nbdkit-gzip-plugin.pod
-
-CLEANFILES = *~
-
-plugindir = $(libdir)/nbdkit/plugins
 
 if HAVE_ZLIB
 
@@ -54,16 +52,16 @@ nbdkit_gzip_plugin_la_LIBADD = \
 nbdkit_gzip_plugin_la_LDFLAGS = \
 	-module -avoid-version -shared
 
-if HAVE_POD2MAN
+if HAVE_POD
 
 man_MANS = nbdkit-gzip-plugin.1
 CLEANFILES += $(man_MANS)
 
 nbdkit-gzip-plugin.1: nbdkit-gzip-plugin.pod
-	$(POD2MAN) $(POD2MAN_ARGS) --section=1 --name=`basename $@ .1` $< $@.t && \
-	if grep 'POD ERROR' $@.t; then rm $@.t; exit 1; fi && \
-	mv $@.t $@
+	$(PODWRAPPER) --section=1 --man $@ \
+	    --html $(top_builddir)/html/$@.html \
+	    $<
 
-endif
+endif HAVE_POD
 
 endif

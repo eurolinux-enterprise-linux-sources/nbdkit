@@ -1,5 +1,5 @@
 # nbdkit
-# Copyright (C) 2013-2014 Red Hat Inc.
+# Copyright (C) 2013-2018 Red Hat Inc.
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
@@ -30,13 +30,11 @@
 # OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 # SUCH DAMAGE.
 
+include $(top_srcdir)/common-rules.mk
+
 EXTRA_DIST = \
 	nbdkit-perl-plugin.pod \
 	example.pl
-
-CLEANFILES = *~
-
-plugindir = $(libdir)/nbdkit/plugins
 
 if HAVE_PERL
 
@@ -56,16 +54,16 @@ nbdkit_perl_plugin_la_LDFLAGS = \
 	-module -avoid-version -shared \
 	$(PERL_LDOPTS)
 
-if HAVE_POD2MAN
+if HAVE_POD
 
 man_MANS = nbdkit-perl-plugin.3
 CLEANFILES += $(man_MANS)
 
 nbdkit-perl-plugin.3: nbdkit-perl-plugin.pod
-	$(POD2MAN) $(POD2MAN_ARGS) --section=3 --name=`basename $@ .3` $< $@.t && \
-	if grep 'POD ERROR' $@.t; then rm $@.t; exit 1; fi && \
-	mv $@.t $@
+	$(PODWRAPPER) --section=3 --man $@ \
+	    --html $(top_builddir)/html/$@.html \
+	    $<
 
-endif
+endif HAVE_POD
 
 endif

@@ -1,4 +1,4 @@
-#!/bin/bash -
+#!/usr/bin/env bash
 # nbdkit
 # Copyright (C) 2014 Red Hat Inc.
 # All rights reserved.
@@ -31,6 +31,7 @@
 # OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 # SUCH DAMAGE.
 
+source ./functions.sh
 set -e
 
 output="$(nbdkit --help)"
@@ -39,3 +40,24 @@ if [[ ! ( "$output" =~ dump-config ) ]]; then
     echo "$output"
     exit 1
 fi
+
+# Run nbdkit plugin --help for each plugin.
+# However some of these tests are expected to fail.
+test ()
+{
+    case "$1${NBDKIT_VALGRIND:+-valgrind}" in
+        vddk | vddk-valgrind)
+            # VDDK won't run without special environment variables
+            # being set, so ignore it.
+            ;;
+        lua-valgrind | perl-valgrind | python-valgrind | \
+        ruby-valgrind | tcl-valgrind | \
+        example4-valgrind | tar-valgrind)
+            # Plugins written in scripting languages can't run under valgrind.
+            ;;
+        *)
+            nbdkit $1 --help
+            ;;
+    esac
+}
+foreach_plugin test

@@ -1,5 +1,5 @@
 /* nbdkit
- * Copyright (C) 2013-2014 Red Hat Inc.
+ * Copyright (C) 2013-2018 Red Hat Inc.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -168,6 +168,10 @@ static void
 perl_dump_plugin (void)
 {
   dSP;
+
+#ifdef PERL_VERSION_STRING
+  printf ("perl_version=%s\n", PERL_VERSION_STRING);
+#endif
 
   if (script && callback_defined ("dump_plugin")) {
     ENTER;

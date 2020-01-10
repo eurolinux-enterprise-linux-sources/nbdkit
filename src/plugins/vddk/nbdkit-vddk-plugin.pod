@@ -1,8 +1,6 @@
-=encoding utf8
-
 =head1 NAME
 
-nbdkit-vddk-plugin - VMware VDDK plugin for nbdkit
+nbdkit-vddk-plugin - nbdkit VMware VDDK plugin
 
 =head1 SYNOPSIS
 
@@ -10,41 +8,61 @@ nbdkit-vddk-plugin - VMware VDDK plugin for nbdkit
              [vm=moref=ID] [server=HOSTNAME] [user=USERNAME]
              [password=PASSWORD | password=- | password=+FILENAME]
              [cookie=COOKIE] [thumbprint=THUMBPRINT]
-             [vimapiver=APIVER] [port=PORT] [nfchostport=PORT]
+             [port=PORT] [nfchostport=PORT]
              [snapshot=MOREF] [transports=MODE:MODE:...]
  nbdkit vddk --dump-plugin
 
 =head1 DESCRIPTION
 
-C<nbdkit-vddk-plugin> is a L<nbdkit(1)> plugin that serves files from
+C<nbdkit-vddk-plugin> is an L<nbdkit(1)> plugin that serves files from
 local VMware VMDK files, VMware ESXi servers, VMware VCenter servers,
-and other sources by using VMware's proprietary VDDK library.
+and other sources.  It requires VMware's proprietary VDDK library that
+you must download yourself separately.
 
 The plugin can serve read-only (if the I<-r> option is used) or
 read/write.
 
-=head1 LIBRARY LOCATION
+=head1 LIBRARY AND CONFIG FILE LOCATIONS
 
-If the VDDK library (C<libvixDiskLib.so>) is located on a non-standard
-path, you may need to set C<LD_LIBRARY_PATH> or modify
-C</etc/ld.so.conf> before this plugin will work.
+If the VDDK library (F<libvixDiskLib.so.6>) is located on a
+non-standard path, you may need to set C<LD_LIBRARY_PATH> or modify
+F</etc/ld.so.conf> before this plugin will work.  In addition you may
+want to set the C<libdir> parameter so that the VDDK library can load
+plugins like Advanced Transport.
 
-The VDDK library may depend on C<libexpat.so.0> or other libraries
-which you may have to install yourself.
+For 64 bit platforms pass the F<lib64> subdirectory:
+
+ export LD_LIBRARY_PATH=/path/to/vmware-vix-disklib-distrib/lib64
+
+For 32 bit platforms pass the F<lib32> subdirectory:
+
+ export LD_LIBRARY_PATH=/path/to/vmware-vix-disklib-distrib/lib32
+
+Then pass the VDDK distribution directory as C<libdir> along with
+other parameters as required:
+
+ nbdkit vddk \
+     libdir=/path/to/vmware-vix-disklib-distrib \
+     file=file.vmdk
+
+VDDK itself looks in a few default locations for the optional
+configuration file, usually including F</etc/vmware/config> and
+F<$HOME/.vmware/config>, but you can override this using the C<config>
+parameter.
 
 =head1 PARAMETERS
 
 =over 4
 
-=item B<config=FILENAME>
+=item B<config=>FILENAME
 
 Optional.  The name of the VDDK configuration file.
 
-=item B<cookie=COOKIE>
+=item B<cookie=>COOKIE
 
 Optional.  Cookie from existing authenticated session on the host.
 
-=item B<file=FILENAME>
+=item B<file=>FILENAME
 
 Required.  Set the name of the VMDK file to serve.
 
@@ -65,22 +83,24 @@ If a VM has multiple disks, nbdkit can only serve one at a time.  To
 serve more than one you must run multiple copies of nbdkit.  (See
 L</NOTES> below).
 
-=item B<libdir=PATHNAME>
+=item B<libdir=>PATHNAME
 
-Optional.  This sets the path of the VMware VDDK library.  It must be
-an absolute path.
+Optional.  This sets the path of the VMware VDDK distribution.
+
+VDDK uses this to load its own plugins, if this path is unspecified or
+wrong then VDDK will work with reduced functionality.
 
 If the parameter is not given, then a hard-coded path determined at
-compile time is used.
+compile time is used, see L</DUMP-PLUGIN OUTPUT> below.
 
-=item B<nfchostport=PORT>
+=item B<nfchostport=>PORT
 
 Optional.  Port used to establish an NFC connection to ESXi.  Defaults
 to 902.
 
 (Only supported in VDDK ≥ 5.5.5 and ≥ 6.0.1)
 
-=item B<password=PASSWORD>
+=item B<password=>PASSWORD
 
 Optional (required for remote connections).  Set the password to use
 when connecting to the remote server.
@@ -93,26 +113,26 @@ machines.
 Optional (required for remote connections).  Ask for the password
 (interactively) when nbdkit starts up.
 
-=item B<password=+FILENAME>
+=item B<password=+>FILENAME
 
 Optional (required for remote connections).  Read the password from
 the named file.  This is the most secure method to supply a password,
 as long as you set the permissions on the file appropriately.
 
-=item B<port=PORT>
+=item B<port=>PORT
 
 Optional.  The port on the VCenter/ESXi host.  Defaults to 443.
 
-=item B<server=HOSTNAME>
+=item B<server=>HOSTNAME
 
 Optional (required for remote connections).  The hostname or IP
 address of VCenter or ESXi host.
 
-=item B<snapshot=MOREF>
+=item B<snapshot=>MOREF
 
 Optional.  The Managed Object Reference of the snapshot.
 
-=item B<thumbprint=THUMBPRINT>
+=item B<thumbprint=>THUMBPRINT
 
 Optional.  The SSL (SHA1) thumbprint for validating the SSL
 certificate.
@@ -132,19 +152,19 @@ using this command:
 
  # openssl x509 -in /etc/vmware-vpx/ssl/rui.crt -fingerprint -sha1 -noout
 
-=item B<transports=MODE:MODE:...>
+=item B<transports=>MODEB<:>MODEB<:>...
 
 Optional.  List of one or more transport modes to use.  Possible
 values include ‘nbd’, ‘nbdssl’, ‘san’, ‘hotadd’, ‘file’ (there may be
 others).  If not given, VDDK will try to choose the best transport
 mode.
 
-=item B<user=USERNAME>
+=item B<user=>USERNAME
 
 Optional (required for remote connections).  The username to connect
 to the remote server as.
 
-=item B<vm=moref=ID>
+=item B<vm=moref=>ID
 
 Optional (required for remote connections).  The Managed Object
 Reference ("moref") of the virtual machine.
@@ -175,12 +195,9 @@ C<moRefFinder.pl> script written by William Lam
 (L<http://www.virtuallyghetto.com/2011/11/vsphere-moref-managed-object-reference.html>
 L<https://blogs.vmware.com/vsphere/2012/02/uniquely-identifying-virtual-machines-in-vsphere-and-vcloud-part-2-technical.html>).
 
-=item B<vimapiver=APIVER>
+=item B<vimapiver=>APIVER
 
-Optional.  Specify the VIM API version.  If not given it defaults to
-the current version.
-
-(Only supported in VDDK ≥ 6.5.0)
+This parameter is ignored for backwards compatibility.
 
 =back
 
@@ -219,7 +236,7 @@ script, see L</PARAMETERS> above.  Note that it is different from the
 moref used by vCenter, and is just a single number.
 
 C<file> is the actual file you want to open, usually in the form
-C<"[datastore] vmname/vmname.vmdk">.  You can find this from the
+C<"[datastore] vmname/vmname.vmdk">.  You can find this from
 L<virsh(1)> as described in L</PARAMETERS> above.
 
 =head2 Open a file on a remote VMware vCenter server
@@ -244,7 +261,7 @@ script, see L</PARAMETERS> above.  Note that it is different from the
 moref used by ESXi, and always begins with the prefix C<"vm-">.
 
 C<file> is the actual file you want to open, usually in the form
-C<"[datastore] vmname/vmname.vmdk">.  You can find this from the
+C<"[datastore] vmname/vmname.vmdk">.  You can find this from
 L<virsh(1)> as described in L</PARAMETERS> above.
 
 =head1 DUMP-PLUGIN OUTPUT
@@ -271,10 +288,10 @@ at runtime.
 If this is printed then the C<nfchostport=PORT> parameter is supported
 by this build.
 
-=item C<vddk_has_vimapiver=1>
+=item C<vddk_dll=...>
 
-If this is printed then the C<vimapiver=APIVER> parameter is supported
-by this build.
+Prints the full path to the VDDK shared library.  Since this requires
+a glibc extension it may not be available in all builds of the plugin.
 
 =back
 
@@ -313,9 +330,37 @@ For VMs with multiple disks, it would be nice to map the disk names to
 NBD export names.  However nbdkit core will need to be extended to
 support this.
 
+=head2 Out of memory errors
+
+In the verbose log you may see errors like:
+
+ nbdkit: vddk[3]: error: [NFC ERROR] NfcFssrvrProcessErrorMsg:
+ received NFC error 5 from server: Failed to allocate the
+ requested 2097176 bytes
+
+This seems especially common when there are multiple parallel
+connections open to the VMware server.
+
+These can be caused by resource limits set on the VMware server.  You
+can increase the limit for the NFC service by editing
+F</etc/vmware/hostd/config.xml> and adjusting the
+C<E<lt>maxMemoryE<gt>> setting:
+
+ <nfcsvc>
+   <path>libnfcsvc.so</path>
+   <enabled>true</enabled>
+   <maxMemory>50331648</maxMemory>
+   <maxStreamMemory>10485760</maxStreamMemory>
+ </nfcsvc>
+
+and restarting the C<hostd> service:
+
+ # /etc/init.d/hostd restart
+
+For more information see L<https://bugzilla.redhat.com/1614276>.
+
 =head1 SEE ALSO
 
-L<https://github.com/libguestfs/nbdkit/blob/master/plugins/vddk/vddk.c>,
 L<nbdkit(1)>,
 L<nbdkit-plugin(3)>,
 L<virsh(1)>,
@@ -327,44 +372,4 @@ Richard W.M. Jones
 
 =head1 COPYRIGHT
 
-Copyright (C) 2013-2017 Red Hat Inc.
-
-=head1 LICENSE
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are
-met:
-
-=over 4
-
-=item *
-
-Redistributions of source code must retain the above copyright
-notice, this list of conditions and the following disclaimer.
-
-=item *
-
-Redistributions in binary form must reproduce the above copyright
-notice, this list of conditions and the following disclaimer in the
-documentation and/or other materials provided with the distribution.
-
-=item *
-
-Neither the name of Red Hat nor the names of its contributors may be
-used to endorse or promote products derived from this software without
-specific prior written permission.
-
-=back
-
-THIS SOFTWARE IS PROVIDED BY RED HAT AND CONTRIBUTORS ''AS IS'' AND
-ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
-THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
-PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL RED HAT OR
-CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
-USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
-ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
-OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
-SUCH DAMAGE.
+Copyright (C) 2013-2018 Red Hat Inc.

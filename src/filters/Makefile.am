@@ -30,9 +30,6 @@
 # OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 # SUCH DAMAGE.
 
-SUBDIRS = \
-	cache \
-	cow \
-	delay \
-	offset \
-	partition
+include $(top_srcdir)/common-rules.mk
+
+SUBDIRS = $(filters)

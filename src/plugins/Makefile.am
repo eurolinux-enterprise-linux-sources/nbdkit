@@ -1,5 +1,5 @@
 # nbdkit
-# Copyright (C) 2013-2014 Red Hat Inc.
+# Copyright (C) 2013-2018 Red Hat Inc.
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
@@ -30,25 +30,6 @@
 # OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 # SUCH DAMAGE.
 
-SUBDIRS = \
-	curl \
-	example1 \
-	example2 \
-	example3 \
-	example4 \
-	file \
-	guestfs \
-	gzip \
-	libvirt \
-	memory \
-	nbd \
-	null \
-	ocaml \
-	perl \
-	python \
-	ruby \
-	split \
-	streaming \
-	tar \
-	vddk \
-	xz
+include $(top_srcdir)/common-rules.mk
+
+SUBDIRS = $(plugins)

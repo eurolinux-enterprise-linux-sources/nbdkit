@@ -1,5 +1,5 @@
 /* nbdkit
- * Copyright (C) 2013-2014 Red Hat Inc.
+ * Copyright (C) 2013-2018 Red Hat Inc.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -54,12 +54,16 @@ main (int argc, char *argv[])
   /* These languages currently fail completely when run under
    * valgrind, so skip them.
    */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-result"
   if (getenv ("NBDKIT_VALGRIND") != NULL &&
       (strcmp (LANG, "python") == 0 ||
-       strcmp (LANG, "ruby") == 0)) {
+       strcmp (LANG, "ruby") == 0 ||
+       strcmp (LANG, "tcl") == 0)) {
     fprintf (stderr, "%s test skipped under valgrind.\n", LANG);
     exit (77);                  /* Tells automake to skip the test. */
   }
+#pragma GCC diagnostic pop
 
   if (test_start_nbdkit (LANG, SCRIPT, NULL) == -1)
     exit (EXIT_FAILURE);
@@ -90,7 +94,7 @@ main (int argc, char *argv[])
   if (guestfs_mkfs (g, "ext4", "/dev/sda1") == -1)
     exit (EXIT_FAILURE);
 
-  if (guestfs_mount (g, "/dev/sda1", "/") == -1)
+  if (guestfs_mount_options (g, "discard", "/dev/sda1", "/") == -1)
     exit (EXIT_FAILURE);
 
 #define filename "/hello.txt"
@@ -121,6 +125,13 @@ main (int argc, char *argv[])
   if (guestfs_fstrim (g, "/", -1) == -1)
     exit (EXIT_FAILURE);
 #endif
+
+  /* Run fallocate(1) on the device to test zero path. */
+  if (guestfs_umount (g, "/") == -1)
+    exit (EXIT_FAILURE);
+  const char *cmd[] = { "fallocate", "-nzl", "64k", "/dev/sda", NULL };
+  char *s = guestfs_debug (g, "sh", (char **) cmd);
+  free (s);
 
   if (guestfs_shutdown (g) == -1)
     exit (EXIT_FAILURE);

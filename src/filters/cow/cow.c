@@ -61,6 +61,12 @@
  * this we limit the thread model to SERIALIZE_ALL_REQUESTS so that
  * there cannot be concurrent pwrite requests.  We could relax this
  * restriction with a bit of work.
+ *
+ * We allow the client to request FUA, and emulate it with a flush
+ * (arguably, since the write overlay is temporary, and since we
+ * serialize all requests, we could ignore FUA altogether, but
+ * flushing will be more correct if we improve the thread model to be
+ * more parallel).
  */
 
 #include <config.h>
@@ -71,16 +77,23 @@
 #include <stdbool.h>
 #include <string.h>
 #include <inttypes.h>
-#include <alloca.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/types.h>
 #include <sys/ioctl.h>
 
+#ifdef HAVE_ALLOCA_H
+#include <alloca.h>
+#endif
+
 #include <nbdkit-filter.h>
 
-#define DIV_ROUND_UP(n, d) (((n) + (d) - 1) / (d))
+#include "rounding.h"
+
+#ifndef HAVE_FDATASYNC
+#define fdatasync fsync
+#endif
 
 /* XXX See design comment above. */
 #define THREAD_MODEL NBDKIT_THREAD_MODEL_SERIALIZE_ALL_REQUESTS
@@ -108,7 +121,7 @@ cow_load (void)
 
   tmpdir = getenv ("TMPDIR");
   if (!tmpdir)
-    tmpdir = "/var/tmp";
+    tmpdir = LARGE_TMPDIR;
 
   nbdkit_debug ("cow: temporary directory for overlay: %s", tmpdir);
 
@@ -116,7 +129,12 @@ cow_load (void)
   template = alloca (len);
   snprintf (template, len, "%s/XXXXXX", tmpdir);
 
+#ifdef HAVE_MKOSTEMP
   fd = mkostemp (template, O_CLOEXEC);
+#else
+  fd = mkstemp (template);
+  fcntl (fd, F_SETFD, FD_CLOEXEC);
+#endif
   if (fd == -1) {
     nbdkit_error ("mkostemp: %s: %m", tmpdir);
     exit (EXIT_FAILURE);
@@ -235,6 +253,12 @@ cow_can_flush (struct nbdkit_next_ops *next_ops, void *nxdata, void *handle)
   return 1;
 }
 
+static int
+cow_can_fua (struct nbdkit_next_ops *next_ops, void *nxdata, void *handle)
+{
+  return NBDKIT_FUA_EMULATE;
+}
+
 /* Return true if the block is allocated.  Consults the bitmap. */
 static bool
 blk_is_allocated (uint64_t blknum)
@@ -270,7 +294,7 @@ blk_set_allocated (uint64_t blknum)
  */
 static int
 blk_read (struct nbdkit_next_ops *next_ops, void *nxdata,
-          uint64_t blknum, uint8_t *block)
+          uint64_t blknum, uint8_t *block, int *err)
 {
   off_t offset = blknum * BLKSIZE;
   bool allocated = blk_is_allocated (blknum);
@@ -280,9 +304,10 @@ blk_read (struct nbdkit_next_ops *next_ops, void *nxdata,
                 !allocated ? "a hole" : "allocated");
 
   if (!allocated)               /* Read underlying plugin. */
-    return next_ops->pread (nxdata, block, BLKSIZE, offset);
+    return next_ops->pread (nxdata, block, BLKSIZE, offset, 0, err);
   else {                        /* Read overlay. */
     if (pread (fd, block, BLKSIZE, offset) == -1) {
+      *err = errno;
       nbdkit_error ("pread: %m");
       return -1;
     }
@@ -291,7 +316,7 @@ blk_read (struct nbdkit_next_ops *next_ops, void *nxdata,
 }
 
 static int
-blk_write (uint64_t blknum, const uint8_t *block)
+blk_write (uint64_t blknum, const uint8_t *block, int *err)
 {
   off_t offset = blknum * BLKSIZE;
 
@@ -299,6 +324,7 @@ blk_write (uint64_t blknum, const uint8_t *block)
                 blknum, (uint64_t) offset);
 
   if (pwrite (fd, block, BLKSIZE, offset) == -1) {
+    *err = errno;
     nbdkit_error ("pwrite: %m");
     return -1;
   }
@@ -307,15 +333,21 @@ blk_write (uint64_t blknum, const uint8_t *block)
   return 0;
 }
 
+static int
+cow_flush (struct nbdkit_next_ops *next_ops, void *nxdata, void *handle,
+           uint32_t flags, int *err);
+
 /* Read data. */
 static int
 cow_pread (struct nbdkit_next_ops *next_ops, void *nxdata,
-           void *handle, void *buf, uint32_t count, uint64_t offset)
+           void *handle, void *buf, uint32_t count, uint64_t offset,
+           uint32_t flags, int *err)
 {
   uint8_t *block;
 
   block = malloc (BLKSIZE);
   if (block == NULL) {
+    *err = errno;
     nbdkit_error ("malloc: %m");
     return -1;
   }
@@ -329,7 +361,7 @@ cow_pread (struct nbdkit_next_ops *next_ops, void *nxdata,
     if (n > count)
       n = count;
 
-    if (blk_read (next_ops, nxdata, blknum, block) == -1) {
+    if (blk_read (next_ops, nxdata, blknum, block, err) == -1) {
       free (block);
       return -1;
     }
@@ -348,12 +380,14 @@ cow_pread (struct nbdkit_next_ops *next_ops, void *nxdata,
 /* Write data. */
 static int
 cow_pwrite (struct nbdkit_next_ops *next_ops, void *nxdata,
-            void *handle, const void *buf, uint32_t count, uint64_t offset)
+            void *handle, const void *buf, uint32_t count, uint64_t offset,
+            uint32_t flags, int *err)
 {
   uint8_t *block;
 
   block = malloc (BLKSIZE);
   if (block == NULL) {
+    *err = errno;
     nbdkit_error ("malloc: %m");
     return -1;
   }
@@ -368,12 +402,12 @@ cow_pwrite (struct nbdkit_next_ops *next_ops, void *nxdata,
       n = count;
 
     /* Do a read-modify-write operation on the current block. */
-    if (blk_read (next_ops, nxdata, blknum, block) == -1) {
+    if (blk_read (next_ops, nxdata, blknum, block, err) == -1) {
       free (block);
       return -1;
     }
     memcpy (&block[blkoffs], buf, n);
-    if (blk_write (blknum, block) == -1) {
+    if (blk_write (blknum, block, err) == -1) {
       free (block);
       return -1;
     }
@@ -384,18 +418,22 @@ cow_pwrite (struct nbdkit_next_ops *next_ops, void *nxdata,
   }
 
   free (block);
+  if (flags & NBDKIT_FLAG_FUA)
+    return cow_flush (next_ops, nxdata, handle, 0, err);
   return 0;
 }
 
 /* Zero data. */
 static int
 cow_zero (struct nbdkit_next_ops *next_ops, void *nxdata,
-          void *handle, uint32_t count, uint64_t offset, int may_trim)
+          void *handle, uint32_t count, uint64_t offset, uint32_t flags,
+          int *err)
 {
   uint8_t *block;
 
   block = malloc (BLKSIZE);
   if (block == NULL) {
+    *err = errno;
     nbdkit_error ("malloc: %m");
     return -1;
   }
@@ -412,12 +450,12 @@ cow_zero (struct nbdkit_next_ops *next_ops, void *nxdata,
     /* XXX There is the possibility of optimizing this: ONLY if we are
      * writing a whole, aligned block, then use FALLOC_FL_ZERO_RANGE.
      */
-    if (blk_read (next_ops, nxdata, blknum, block) == -1) {
+    if (blk_read (next_ops, nxdata, blknum, block, err) == -1) {
       free (block);
       return -1;
     }
     memset (&block[blkoffs], 0, n);
-    if (blk_write (blknum, block) == -1) {
+    if (blk_write (blknum, block, err) == -1) {
       free (block);
       return -1;
     }
@@ -427,16 +465,20 @@ cow_zero (struct nbdkit_next_ops *next_ops, void *nxdata,
   }
 
   free (block);
+  if (flags & NBDKIT_FLAG_FUA)
+    return cow_flush (next_ops, nxdata, handle, 0, err);
   return 0;
 }
 
 static int
-cow_flush (struct nbdkit_next_ops *next_ops, void *nxdata, void *handle)
+cow_flush (struct nbdkit_next_ops *next_ops, void *nxdata, void *handle,
+           uint32_t flags, int *err)
 {
   /* I think we don't care about file metadata for this temporary
    * file, so only flush the data.
    */
   if (fdatasync (fd) == -1) {
+    *err = errno;
     nbdkit_error ("fdatasync: %m");
     return -1;
   }
@@ -456,6 +498,7 @@ static struct nbdkit_filter filter = {
   .can_write         = cow_can_write,
   .can_flush         = cow_can_flush,
   .can_trim          = cow_can_trim,
+  .can_fua           = cow_can_fua,
   .pread             = cow_pread,
   .pwrite            = cow_pwrite,
   .zero              = cow_zero,

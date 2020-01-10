@@ -1,5 +1,5 @@
 /* nbdkit
- * Copyright (C) 2017 Red Hat Inc.
+ * Copyright (C) 2017-2018 Red Hat Inc.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -76,7 +76,7 @@ split_config (const char *key, const char *value)
       return -1;
     }
     filenames = new_filenames;
-    filenames[nr_files] = nbdkit_absolute_path (value);
+    filenames[nr_files] = nbdkit_realpath (value);
     if (filenames[nr_files] == NULL)
       return -1;
     nr_files++;
@@ -286,6 +286,7 @@ static struct nbdkit_plugin plugin = {
   .unload            = split_unload,
   .config            = split_config,
   .config_help       = split_config_help,
+  .magic_config_key  = "file",
   .open              = split_open,
   .close             = split_close,
   .get_size          = split_get_size,

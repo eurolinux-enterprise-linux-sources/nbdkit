@@ -1,5 +1,5 @@
 /* nbdkit
- * Copyright (C) 2017 Red Hat Inc.
+ * Copyright (C) 2017-2018 Red Hat Inc.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -35,36 +35,48 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <stdint.h>
+#include <inttypes.h>
 #include <string.h>
 #include <errno.h>
+#include <assert.h>
 
 #include <nbdkit-plugin.h>
 
+#include "sparse.h"
+
 /* The size of disk in bytes (initialized by size=<SIZE> parameter). */
-static size_t size = 0;
-static void *disk;
+static int64_t size = 0;
+
+/* Debug directory operations (-D memory.dir=1). */
+int memory_debug_dir;
+
+static struct sparse_array *sa;
+
+static void
+memory_load (void)
+{
+  sa = alloc_sparse_array (memory_debug_dir);
+  if (sa == NULL) {
+    perror ("malloc");
+    exit (EXIT_FAILURE);
+  }
+}
 
 static void
 memory_unload (void)
 {
-  free (disk);
+  free_sparse_array (sa);
 }
 
 static int
 memory_config (const char *key, const char *value)
 {
-  int64_t r;
-
   if (strcmp (key, "size") == 0) {
-    r = nbdkit_parse_size (value);
-    if (r == -1)
+    size = nbdkit_parse_size (value);
+    if (size == -1)
       return -1;
-    if (r > SIZE_MAX) {
-      nbdkit_error ("size > SIZE_MAX");
-      return -1;
-    }
-    size = (ssize_t) r;
   }
   else {
     nbdkit_error ("unknown parameter '%s'", key);
@@ -81,48 +93,23 @@ memory_config_complete (void)
     nbdkit_error ("you must specify size=<SIZE> on the command line");
     return -1;
   }
-  disk = calloc (size, 1);
-  if (disk == NULL) {
-    nbdkit_error ("cannot allocate disk: %m");
-    return -1;
-  }
   return 0;
 }
 
 #define memory_config_help \
   "size=<SIZE>  (required) Size of the backing disk"
 
-/* The per-connection handle. */
-struct memory_handle {
-  int readonly;
-};
-
 /* Create the per-connection handle. */
 static void *
 memory_open (int readonly)
 {
-  struct memory_handle *h;
+  /* Used only as a handle pointer. */
+  static int mh;
 
-  h = malloc (sizeof *h);
-  if (h == NULL) {
-    nbdkit_error ("malloc: %m");
-    return NULL;
-  }
-
-  h->readonly = readonly;
-  return h;
+  return &mh;
 }
 
-/* Free up the per-connection handle. */
-static void
-memory_close (void *handle)
-{
-  struct memory_handle *h = handle;
-
-  free (h);
-}
-
-#define THREAD_MODEL NBDKIT_THREAD_MODEL_PARALLEL
+#define THREAD_MODEL NBDKIT_THREAD_MODEL_SERIALIZE_ALL_REQUESTS
 
 /* Get the disk size. */
 static int64_t
@@ -135,7 +122,7 @@ memory_get_size (void *handle)
 static int
 memory_pread (void *handle, void *buf, uint32_t count, uint64_t offset)
 {
-  memcpy (buf, disk+offset, count);
+  sparse_array_read (sa, buf, count, offset);
   return 0;
 }
 
@@ -143,38 +130,39 @@ memory_pread (void *handle, void *buf, uint32_t count, uint64_t offset)
 static int
 memory_pwrite (void *handle, const void *buf, uint32_t count, uint64_t offset)
 {
-  struct memory_handle *h = handle;
+  return sparse_array_write (sa, buf, count, offset);
+}
 
-  if (h->readonly) {
-    errno = EROFS;
-    return -1;
-  }
-
-  memcpy (disk+offset, buf, count);
+/* Zero. */
+static int
+memory_zero (void *handle, uint32_t count, uint64_t offset, int may_trim)
+{
+  sparse_array_zero (sa, count, offset);
   return 0;
 }
 
+/* Trim (same as zero). */
 static int
-memory_can_write (void *handle)
+memory_trim (void *handle, uint32_t count, uint64_t offset)
 {
-  struct memory_handle *h = handle;
-
-  return !h->readonly;
+  sparse_array_zero (sa, count, offset);
+  return 0;
 }
 
 static struct nbdkit_plugin plugin = {
   .name              = "memory",
   .version           = PACKAGE_VERSION,
+  .load              = memory_load,
   .unload            = memory_unload,
   .config            = memory_config,
   .config_complete   = memory_config_complete,
   .config_help       = memory_config_help,
   .open              = memory_open,
-  .close             = memory_close,
   .get_size          = memory_get_size,
   .pread             = memory_pread,
   .pwrite            = memory_pwrite,
-  .can_write         = memory_can_write,
+  .zero              = memory_zero,
+  .trim              = memory_trim,
   /* In this plugin, errno is preserved properly along error return
    * paths from failed system calls.
    */

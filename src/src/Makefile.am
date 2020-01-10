@@ -1,5 +1,5 @@
 # nbdkit
-# Copyright (C) 2013 Red Hat Inc.
+# Copyright (C) 2013-2018 Red Hat Inc.
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
@@ -30,8 +30,7 @@
 # OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 # SUCH DAMAGE.
 
-plugindir = $(libdir)/nbdkit/plugins
-filterdir = $(libdir)/nbdkit/filters
+include $(top_srcdir)/common-rules.mk
 
 sbin_PROGRAMS = nbdkit
 
@@ -39,10 +38,13 @@ nbdkit_SOURCES = \
 	cleanup.c \
 	connections.c \
 	crypto.c \
-	errors.c \
+	debug.c \
 	filters.c \
 	internal.h \
 	locks.c \
+	log.c \
+	log-stderr.c \
+	log-syslog.c \
 	main.c \
 	plugins.c \
 	protocol.h \
@@ -60,21 +62,48 @@ nbdkit_CPPFLAGS = \
 	-Dfilterdir=\"$(filterdir)\" \
 	-Dsbindir=\"$(sbindir)\" \
 	-Dsysconfdir=\"$(sysconfdir)\" \
-	-I$(top_srcdir)/include
+	-I$(top_srcdir)/include \
+	-I$(top_srcdir)/common/include
 nbdkit_CFLAGS = \
-	-pthread \
+	$(PTHREAD_CFLAGS) \
 	$(WARNINGS_CFLAGS) \
-	$(GNUTLS_CFLAGS)
+	$(GNUTLS_CFLAGS) \
+	$(VALGRIND_CFLAGS)
 nbdkit_LDADD = \
 	$(GNUTLS_LIBS) \
-	-ldl
+	$(DL_LIBS)
 nbdkit_LDFLAGS = \
-	-pthread \
-	-rdynamic
+	$(PTHREAD_LIBS) \
+	$(DL_LDFLAGS)
 
-CLEANFILES = *~
+# synopsis.c is generated from docs/synopsis.txt where it is also
+# used to generate the man page.  It is included in main.c.
+
+EXTRA_DIST = synopsis.c
+nbdkit_DEPENDENCIES = synopsis.c
+CLEANFILES += synopsis.c
+main.c: synopsis.c
+synopsis.c: $(top_srcdir)/docs/synopsis.txt
+	rm -f $@ $@-t
+	$(SED) -e 's/\(.*\)/"\1\\n"/g' $< > $@-t
+	mv $@-t $@
 
 # pkg-config / pkgconf
 
 pkgconfigdir = $(libdir)/pkgconfig
 pkgconfig_DATA = nbdkit.pc
+
+# Unit testing
+
+TESTS = test-utils
+
+check_PROGRAMS = test-utils
+
+test_utils_SOURCES = \
+	test-utils.c \
+	utils.c \
+	cleanup.c
+test_utils_CPPFLAGS = \
+	-I$(top_srcdir)/include \
+	-I$(top_srcdir)/common/include
+test_utils_CFLAGS = $(WARNINGS_CFLAGS) $(VALGRIND_CFLAGS)

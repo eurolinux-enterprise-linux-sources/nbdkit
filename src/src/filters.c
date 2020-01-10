@@ -39,11 +39,9 @@
 #include <string.h>
 #include <inttypes.h>
 #include <assert.h>
-#include <errno.h>
 
 #include <dlfcn.h>
 
-#include "nbdkit-filter.h"
 #include "internal.h"
 
 /* We extend the generic backend struct with extra fields relating
@@ -82,7 +80,8 @@ filter_free (struct backend *b)
   if (f->filter.unload)
     f->filter.unload ();
 
-  dlclose (f->dl);
+  if (DO_DLCLOSE)
+    dlclose (f->dl);
   free (f->filename);
 
   unlock_unload ();
@@ -107,14 +106,6 @@ filter_thread_model (struct backend *b)
 /* This is actually passing the request through to the final plugin,
  * hence the function name.
  */
-static int
-plugin_errno_is_preserved (struct backend *b)
-{
-  struct backend_filter *f = container_of (b, struct backend_filter, backend);
-
-  return f->backend.next->errno_is_preserved (f->backend.next);
-}
-
 static const char *
 plugin_name (struct backend *b)
 {
@@ -143,19 +134,22 @@ static void
 filter_usage (struct backend *b)
 {
   struct backend_filter *f = container_of (b, struct backend_filter, backend);
+  const char *p;
 
   printf ("filter: %s", f->name);
   if (f->filter.longname)
     printf (" (%s)", f->filter.longname);
   printf ("\n");
-  printf ("(%s)", f->filename);
+  printf ("(%s)\n", f->filename);
   if (f->filter.description) {
-    printf ("\n");
-    printf ("%s\n", f->filter.description);
+    printf ("%s", f->filter.description);
+    if ((p = strrchr (f->filter.description, '\n')) == NULL || p[1])
+      printf ("\n");
   }
   if (f->filter.config_help) {
-    printf ("\n");
-    printf ("%s\n", f->filter.config_help);
+    printf ("%s", f->filter.config_help);
+    if ((p = strrchr (f->filter.config_help, '\n')) == NULL || p[1])
+      printf ("\n");
   }
 }
 
@@ -212,6 +206,17 @@ filter_config_complete (struct backend *b)
   }
   else
     f->backend.next->config_complete (f->backend.next);
+}
+
+/* magic_config_key only applies to plugins, so this passes the
+ * request through to the plugin (hence the name).
+ */
+static const char *
+plugin_magic_config_key (struct backend *b)
+{
+  struct backend_filter *f = container_of (b, struct backend_filter, backend);
+
+  return f->backend.next->magic_config_key (f->backend.next);
 }
 
 static int
@@ -298,43 +303,58 @@ next_can_trim (void *nxdata)
 }
 
 static int
-next_pread (void *nxdata, void *buf, uint32_t count, uint64_t offset)
+next_can_zero (void *nxdata)
 {
   struct b_conn *b_conn = nxdata;
-  return b_conn->b->pread (b_conn->b, b_conn->conn, buf, count, offset, 0);
+  return b_conn->b->can_zero (b_conn->b, b_conn->conn);
 }
 
 static int
-next_pwrite (void *nxdata, const void *buf, uint32_t count, uint64_t offset)
+next_can_fua (void *nxdata)
 {
   struct b_conn *b_conn = nxdata;
-  return b_conn->b->pwrite (b_conn->b, b_conn->conn, buf, count, offset, 0);
+  return b_conn->b->can_fua (b_conn->b, b_conn->conn);
 }
 
 static int
-next_flush (void *nxdata)
+next_pread (void *nxdata, void *buf, uint32_t count, uint64_t offset,
+            uint32_t flags, int *err)
 {
   struct b_conn *b_conn = nxdata;
-  return b_conn->b->flush (b_conn->b, b_conn->conn, 0);
+  return b_conn->b->pread (b_conn->b, b_conn->conn, buf, count, offset, flags,
+                           err);
 }
 
 static int
-next_trim (void *nxdata, uint32_t count, uint64_t offset)
+next_pwrite (void *nxdata, const void *buf, uint32_t count, uint64_t offset,
+             uint32_t flags, int *err)
 {
   struct b_conn *b_conn = nxdata;
-  return b_conn->b->trim (b_conn->b, b_conn->conn, count, offset, 0);
+  return b_conn->b->pwrite (b_conn->b, b_conn->conn, buf, count, offset, flags,
+                            err);
 }
 
 static int
-next_zero (void *nxdata, uint32_t count, uint64_t offset, int may_trim)
+next_flush (void *nxdata, uint32_t flags, int *err)
 {
   struct b_conn *b_conn = nxdata;
-  uint32_t f = 0;
+  return b_conn->b->flush (b_conn->b, b_conn->conn, flags, err);
+}
 
-  if (may_trim)
-    f |= NBDKIT_FLAG_MAY_TRIM;
+static int
+next_trim (void *nxdata, uint32_t count, uint64_t offset, uint32_t flags,
+           int *err)
+{
+  struct b_conn *b_conn = nxdata;
+  return b_conn->b->trim (b_conn->b, b_conn->conn, count, offset, flags, err);
+}
 
-  return b_conn->b->zero (b_conn->b, b_conn->conn, count, offset, f);
+static int
+next_zero (void *nxdata, uint32_t count, uint64_t offset, uint32_t flags,
+           int *err)
+{
+  struct b_conn *b_conn = nxdata;
+  return b_conn->b->zero (b_conn->b, b_conn->conn, count, offset, flags, err);
 }
 
 static struct nbdkit_next_ops next_ops = {
@@ -343,6 +363,8 @@ static struct nbdkit_next_ops next_ops = {
   .can_flush = next_can_flush,
   .is_rotational = next_is_rotational,
   .can_trim = next_can_trim,
+  .can_zero = next_can_zero,
+  .can_fua = next_can_fua,
   .pread = next_pread,
   .pwrite = next_pwrite,
   .flush = next_flush,
@@ -467,9 +489,39 @@ filter_can_trim (struct backend *b, struct connection *conn)
 }
 
 static int
+filter_can_zero (struct backend *b, struct connection *conn)
+{
+  struct backend_filter *f = container_of (b, struct backend_filter, backend);
+  void *handle = connection_get_handle (conn, f->backend.i);
+  struct b_conn nxdata = { .b = f->backend.next, .conn = conn };
+
+  debug ("%s: can_zero", f->name);
+
+  if (f->filter.can_zero)
+    return f->filter.can_zero (&next_ops, &nxdata, handle);
+  else
+    return f->backend.next->can_zero (f->backend.next, conn);
+}
+
+static int
+filter_can_fua (struct backend *b, struct connection *conn)
+{
+  struct backend_filter *f = container_of (b, struct backend_filter, backend);
+  void *handle = connection_get_handle (conn, f->backend.i);
+  struct b_conn nxdata = { .b = f->backend.next, .conn = conn };
+
+  debug ("%s: can_fua", f->name);
+
+  if (f->filter.can_fua)
+    return f->filter.can_fua (&next_ops, &nxdata, handle);
+  else
+    return f->backend.next->can_fua (f->backend.next, conn);
+}
+
+static int
 filter_pread (struct backend *b, struct connection *conn,
               void *buf, uint32_t count, uint64_t offset,
-              uint32_t flags)
+              uint32_t flags, int *err)
 {
   struct backend_filter *f = container_of (b, struct backend_filter, backend);
   void *handle = connection_get_handle (conn, f->backend.i);
@@ -477,42 +529,42 @@ filter_pread (struct backend *b, struct connection *conn,
 
   assert (flags == 0);
 
-  debug ("%s: pread count=%" PRIu32 " offset=%" PRIu64,
-         f->name, count, offset);
+  debug ("%s: pread count=%" PRIu32 " offset=%" PRIu64 " flags=0x%" PRIx32,
+         f->name, count, offset, flags);
 
   if (f->filter.pread)
     return f->filter.pread (&next_ops, &nxdata, handle,
-                            buf, count, offset);
+                            buf, count, offset, flags, err);
   else
     return f->backend.next->pread (f->backend.next, conn,
-                                   buf, count, offset, flags);
+                                   buf, count, offset, flags, err);
 }
 
 static int
 filter_pwrite (struct backend *b, struct connection *conn,
                const void *buf, uint32_t count, uint64_t offset,
-               uint32_t flags)
+               uint32_t flags, int *err)
 {
   struct backend_filter *f = container_of (b, struct backend_filter, backend);
   void *handle = connection_get_handle (conn, f->backend.i);
   struct b_conn nxdata = { .b = f->backend.next, .conn = conn };
-  bool fua = flags & NBDKIT_FLAG_FUA;
 
   assert (!(flags & ~NBDKIT_FLAG_FUA));
 
-  debug ("%s: pwrite count=%" PRIu32 " offset=%" PRIu64 " fua=%d",
-         f->name, count, offset, fua);
+  debug ("%s: pwrite count=%" PRIu32 " offset=%" PRIu64 " flags=0x%" PRIx32,
+         f->name, count, offset, flags);
 
   if (f->filter.pwrite)
     return f->filter.pwrite (&next_ops, &nxdata, handle,
-                             buf, count, offset);
+                             buf, count, offset, flags, err);
   else
     return f->backend.next->pwrite (f->backend.next, conn,
-                                    buf, count, offset, flags);
+                                    buf, count, offset, flags, err);
 }
 
 static int
-filter_flush (struct backend *b, struct connection *conn, uint32_t flags)
+filter_flush (struct backend *b, struct connection *conn, uint32_t flags,
+              int *err)
 {
   struct backend_filter *f = container_of (b, struct backend_filter, backend);
   void *handle = connection_get_handle (conn, f->backend.i);
@@ -520,18 +572,18 @@ filter_flush (struct backend *b, struct connection *conn, uint32_t flags)
 
   assert (flags == 0);
 
-  debug ("%s: flush", f->name);
+  debug ("%s: flush flags=0x%" PRIx32, f->name, flags);
 
   if (f->filter.flush)
-    return f->filter.flush (&next_ops, &nxdata, handle);
+    return f->filter.flush (&next_ops, &nxdata, handle, flags, err);
   else
-    return f->backend.next->flush (f->backend.next, conn, flags);
+    return f->backend.next->flush (f->backend.next, conn, flags, err);
 }
 
 static int
 filter_trim (struct backend *b, struct connection *conn,
              uint32_t count, uint64_t offset,
-             uint32_t flags)
+             uint32_t flags, int *err)
 {
   struct backend_filter *f = container_of (b, struct backend_filter, backend);
   void *handle = connection_get_handle (conn, f->backend.i);
@@ -539,35 +591,36 @@ filter_trim (struct backend *b, struct connection *conn,
 
   assert (flags == 0);
 
-  debug ("%s: trim count=%" PRIu32 " offset=%" PRIu64,
-         f->name, count, offset);
+  debug ("%s: trim count=%" PRIu32 " offset=%" PRIu64 " flags=0x%" PRIx32,
+         f->name, count, offset, flags);
 
   if (f->filter.trim)
-    return f->filter.trim (&next_ops, &nxdata, handle, count, offset);
+    return f->filter.trim (&next_ops, &nxdata, handle, count, offset, flags,
+                           err);
   else
-    return f->backend.next->trim (f->backend.next, conn, count, offset, flags);
+    return f->backend.next->trim (f->backend.next, conn, count, offset, flags,
+                                  err);
 }
 
 static int
 filter_zero (struct backend *b, struct connection *conn,
-             uint32_t count, uint64_t offset, uint32_t flags)
+             uint32_t count, uint64_t offset, uint32_t flags, int *err)
 {
   struct backend_filter *f = container_of (b, struct backend_filter, backend);
   void *handle = connection_get_handle (conn, f->backend.i);
   struct b_conn nxdata = { .b = f->backend.next, .conn = conn };
-  int may_trim = (flags & NBDKIT_FLAG_MAY_TRIM) != 0;
 
   assert (!(flags & ~(NBDKIT_FLAG_MAY_TRIM | NBDKIT_FLAG_FUA)));
 
-  debug ("%s: zero count=%" PRIu32 " offset=%" PRIu64 " may_trim=%d",
-         f->name, count, offset, may_trim);
+  debug ("%s: zero count=%" PRIu32 " offset=%" PRIu64 " flags=0x%" PRIx32,
+         f->name, count, offset, flags);
 
   if (f->filter.zero)
     return f->filter.zero (&next_ops, &nxdata, handle,
-                           count, offset, may_trim);
+                           count, offset, flags, err);
   else
     return f->backend.next->zero (f->backend.next, conn,
-                                  count, offset, flags);
+                                  count, offset, flags, err);
 }
 
 static struct backend filter_functions = {
@@ -580,7 +633,7 @@ static struct backend filter_functions = {
   .dump_fields = filter_dump_fields,
   .config = filter_config,
   .config_complete = filter_config_complete,
-  .errno_is_preserved = plugin_errno_is_preserved,
+  .magic_config_key = plugin_magic_config_key,
   .open = filter_open,
   .prepare = filter_prepare,
   .finalize = filter_finalize,
@@ -590,6 +643,8 @@ static struct backend filter_functions = {
   .can_flush = filter_can_flush,
   .is_rotational = filter_is_rotational,
   .can_trim = filter_can_trim,
+  .can_zero = filter_can_zero,
+  .can_fua = filter_can_fua,
   .pread = filter_pread,
   .pwrite = filter_pwrite,
   .flush = filter_flush,
@@ -604,7 +659,7 @@ filter_register (struct backend *next, size_t index, const char *filename,
 {
   struct backend_filter *f;
   const struct nbdkit_filter *filter;
-  size_t i, len, size;
+  size_t i, len;
 
   f = calloc (1, sizeof *f);
   if (f == NULL) {
@@ -632,23 +687,17 @@ filter_register (struct backend *next, size_t index, const char *filename,
     exit (EXIT_FAILURE);
   }
 
-  /* Check for incompatible future versions. */
-  if (filter->_api_version != 1) {
+  /* We do not provide API or ABI guarantees for filters, other than
+   * the ABI position of _api_version that will let us diagnose
+   * mismatch when the API changes.
+   */
+  if (filter->_api_version != NBDKIT_FILTER_API_VERSION) {
     fprintf (stderr, "%s: %s: filter is incompatible with this version of nbdkit (_api_version = %d)\n",
              program_name, f->filename, filter->_api_version);
     exit (EXIT_FAILURE);
   }
 
-  /* Since the filter might be much older than the current version of
-   * nbdkit, only copy up to the self-declared _struct_size of the
-   * filter and zero out the rest.  If the filter is much newer then
-   * we'll only call the "old" fields.
-   */
-  size = sizeof f->filter;      /* our struct */
-  memset (&f->filter, 0, size);
-  if (size > filter->_struct_size)
-    size = filter->_struct_size;
-  memcpy (&f->filter, filter, size);
+  f->filter = *filter;
 
   /* Only filter.name is required. */
   if (f->filter.name == NULL) {
@@ -683,6 +732,9 @@ filter_register (struct backend *next, size_t index, const char *filename,
   }
 
   debug ("registered filter %s (name %s)", f->filename, f->name);
+
+  /* Set debug flags before calling load. */
+  set_debug_flags (dl, f->name);
 
   /* Call the on-load callback if it exists. */
   debug ("%s: load", f->name);

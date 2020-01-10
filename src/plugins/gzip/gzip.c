@@ -1,5 +1,5 @@
 /* nbdkit
- * Copyright (C) 2013 Red Hat Inc.
+ * Copyright (C) 2013-2018 Red Hat Inc.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -62,7 +62,7 @@ gzip_config (const char *key, const char *value)
 {
   if (strcmp (key, "file") == 0) {
     /* See FILENAMES AND PATHS in nbdkit-plugin(3). */
-    filename = nbdkit_absolute_path (value);
+    filename = nbdkit_realpath (value);
     if (!filename)
       return -1;
   }
@@ -217,6 +217,7 @@ static struct nbdkit_plugin plugin = {
   .config            = gzip_config,
   .config_complete   = gzip_config_complete,
   .config_help       = gzip_config_help,
+  .magic_config_key  = "file",
   .open              = gzip_open,
   .close             = gzip_close,
   .get_size          = gzip_get_size,

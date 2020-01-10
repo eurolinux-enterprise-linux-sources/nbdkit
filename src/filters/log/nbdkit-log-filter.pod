@@ -1,0 +1,76 @@
+=head1 NAME
+
+nbdkit-log-filter - nbdkit log filter
+
+=head1 SYNOPSIS
+
+ nbdkit --filter=log plugin logfile=FILE [logappend=BOOL] [plugin-args...]
+
+=head1 DESCRIPTION
+
+C<nbdkit-log-filter> is a filter that logs all transactions.  When
+used as the first filter, it can show the original client requests; as
+a later filter, it can show how earlier filters have modified the
+original request.  The log results are placed in a user-specified
+file; for more details on the log format, see L<FILES>.  Note that
+using C<nbdkit -v -f> produces much more verbose logging details to
+stderr about every aspect of nbdkit operation, although this requires
+running nbdkit in the foreground; while the log filter is designed to
+work even when nbdkit is run as a daemon.
+
+=head1 PARAMETERS
+
+The nbdkit-log-filter requires a single parameter C<logfile> which
+specifies the path of the file to use for logging.  If the file
+already exists, it will be truncated unless the C<logappend> parameter
+was specified with a value that can be parsed as a boolean true.
+
+=head1 EXAMPLES
+
+Serve the file F<disk.img>, and log each client transaction in the
+file F<disk.log>:
+
+ nbdkit --filter=log file disk.img logfile=disk.log
+
+Repeat the task, but with the cow (copy-on-write) filter to perform
+local caching of data served from the original plugin:
+
+ nbdkit --filter=cow --filter=log file disk.img logfile=disk.log2
+
+After running a client that performs the same operations under each of
+the two servers, you can compare F<disk.log> and F<disk.log2> to see
+the impact of the caching.
+
+=head1 FILES
+
+This filter writes to the file specified by the C<logfile=FILE>
+parameter.  All lines include a timestamp, a connection counter, then
+details about the command.  The following actions are logged: Connect,
+Read, Write, Zero, Trim, Flush, and Disconnect.  Except for Connect
+and Disconnect, an event is logged across two lines for call and
+return value, to allow tracking duration and tracing any parallel
+execution, using id for correlation (incremented per action on the
+connection).
+
+An example logging session of a client that performs a single
+successful read is:
+
+ 2018-01-27 20:38:22.959984 connection=1 Connect size=0x400 write=1 flush=1 rotational=0 trim=0 zero=1 fua=1
+ 2018-01-27 20:38:23.001720 connection=1 Read id=1 offset=0x0 count=0x100 ...
+ 2018-01-27 20:38:23.001995 connection=1 ...Read id=1 return=0 (Success)
+ 2018-01-27 20:38:23.044259 connection=1 Disconnect transactions=1
+
+=head1 SEE ALSO
+
+L<nbdkit(1)>,
+L<nbdkit-file-plugin(1)>,
+L<nbdkit-cow-filter(1)>,
+L<nbdkit-filter(3)>.
+
+=head1 AUTHORS
+
+Eric Blake
+
+=head1 COPYRIGHT
+
+Copyright (C) 2018 Red Hat Inc.

@@ -1,11 +1,11 @@
-=encoding utf8
-
 =head1 NAME
 
-nbdkit-plugin - How to write nbdkit plugins
+nbdkit-plugin - how to write nbdkit plugins
 
 =head1 SYNOPSIS
 
+ #define NBDKIT_API_VERSION 2
+ 
  #include <nbdkit-plugin.h>
  
  #define THREAD_MODEL NBDKIT_THREAD_MODEL_SERIALIZE_ALL_REQUESTS
@@ -42,18 +42,50 @@ An nbdkit plugin is a new source device which can be served using the
 Network Block Device (NBD) protocol.  This manual page describes how
 to create an nbdkit plugin in C.
 
-For example plugins, take a look at the source of nbdkit, in the
-C<plugins> directory.
+To see example plugins:
+L<https://github.com/libguestfs/nbdkit/tree/master/plugins>
+
+Plugins written in C have an ABI guarantee: a plugin compiled against
+an older version of nbdkit will still work correctly when loaded with
+a newer nbdkit.  We also try (but cannot guarantee) to support plugins
+compiled against a newer version of nbdkit when loaded with an older
+nbdkit, although the plugin may have reduced functionality if it
+depends on features only provided by newer nbdkit.
+
+For plugins written in C, we also provide an API guarantee: a plugin
+written against an older header will still compile unmodified with a
+newer nbdkit.
+
+The API guarantee does not always apply to plugins written in other
+(non-C) languages which may have to adapt to changes when recompiled
+against a newer nbdkit.
 
 To write plugins in other languages, see:
+L<nbdkit-lua-plugin(3)>,
 L<nbdkit-ocaml-plugin(3)>,
 L<nbdkit-perl-plugin(3)>,
 L<nbdkit-python-plugin(3)>,
-L<nbdkit-ruby-plugin(3)>.
+L<nbdkit-ruby-plugin(3)>,
+L<nbdkit-sh-plugin(3)>,
+L<nbdkit-tcl-plugin(3)>.
+
+=head1 C<#define NBDKIT_API_VERSION 2>
+
+Plugins must choose which API version they want to use, by defining
+NBDKIT_API_VERSION to a positive integer prior to including
+C<nbdkit-plugin.h> (or any other nbdkit header).  The default version
+is 1 for backwards-compatibility with nbdkit v1.1.26 and earlier;
+however, it is recommended that new plugins be written to the maximum
+version (currently 2) as it enables more features and better
+interaction with nbdkit filters.  Therefore, the rest of this document
+only covers the version 2 interface.  A newer nbdkit will always
+support plugins written in C which were compiled against any prior API
+version.
 
 =head1 C<nbdkit-plugin.h>
 
-All plugins should start by including this header file:
+All plugins should start by including this header file, after
+optionally choosing an API version:
 
  #include <nbdkit-plugin.h>
 
@@ -115,14 +147,20 @@ A new client has connected.
 
 =item C<.can_write>, C<.get_size> and other option negotiation callbacks
 
-These are called during option negotiation with the client, but
-before any data is served.
+These are called during option negotiation with the client, but before
+any data is served.  These callbacks may return different values
+across different C<.open> calls, but within a single connection, must
+always return the same value; other code in nbdkit may cache the
+per-connection value returned rather than using the callback a second
+time.
 
 =item C<.pread>, C<.pwrite> and other data serving callbacks
 
 After option negotiation has finished, these may be called to serve
 data.  Depending on the thread model chosen, they might be called in
-parallel from multiple threads.
+parallel from multiple threads.  The data serving callbacks include a
+flags argument; the results of the negotiation callbacks influence
+whether particular flags will ever be passed to a data callback.
 
 =item C<.close>
 
@@ -137,6 +175,58 @@ the thread model).
 =item C<.unload>
 
 is called once just before the plugin is unloaded from memory.
+
+=back
+
+=head1 Flags
+
+The following flags are defined by nbdkit, and used in various data
+serving callbacks as follows:
+
+=over 4
+
+=item C<NBDKIT_FLAG_MAY_TRIM>
+
+This flag is used by the C<.zero> callback; there is no way to disable
+this flag, although a plugin that does not support trims as a way to
+write zeroes may ignore the flag without violating expected semantics.
+
+=item C<NBDKIT_FLAG_FUA>
+
+This flag represents Forced Unit Access semantics.  It is used by the
+C<.pwrite>, C<.zero>, and C<.trim> callbacks to indicate that the
+plugin must not return a result until the action has landed in
+persistent storage.  This flag will not be sent to the plugin unless
+C<.can_fua> is provided and returns C<NBDKIT_FUA_NATIVE>.
+
+=back
+
+The following defines are valid as successful return values for
+C<.can_fua>:
+
+=over 4
+
+=item C<NBDKIT_FUA_NONE>
+
+Forced Unit Access is not supported; the client must manually request
+a flush after writes have completed.  The C<NBDKIT_FLAG_FUA> flag will
+not be passed to the plugin's write callbacks.
+
+=item C<NBDKIT_FUA_EMULATE>
+
+The client may request Forced Unit Access, but it is implemented by
+emulation, where nbdkit calls C<.flush> after a write operation; this
+is semantically correct, but may hurt performance as it tends to flush
+more data than just what the client requested.  The C<NBDKIT_FLAG_FUA>
+flag will not be passed to the plugin's write callbacks.
+
+=item C<NBDKIT_FUA_NATIVE>
+
+The client may request Forced Unit Access, which results in the
+C<NBDKIT_FLAG_FUA> flag being passed to the plugin's write callbacks
+(C<.pwrite>, C<.trim>, and C<.zero>).  When the flag is set, these
+callbacks must not return success until the client's request has
+landed in persistent storage.
 
 =back
 
@@ -177,7 +267,7 @@ an indication of failure.  It has the following prototype:
 The server usually (not always) changes directory to C</> before it
 starts serving connections.  This means that any relative paths passed
 during configuration will not work when the server is running
-(example: S<C<nbdkit plugin.so file=disk.img>>).
+(example: S<C<nbdkit plugin.so disk.img>>).
 
 To avoid problems, prepend relative paths with the current directory
 before storing them in the handle.  Or open files and store the file
@@ -199,6 +289,27 @@ If conversion was not possible, this calls C<nbdkit_error> and returns
 C<NULL>.  Note that this function does not check that the file exists.
 
 The returned string must be freed by the caller.
+
+=head2 C<nbdkit_realpath>
+
+ char *nbdkit_realpath (const char *filename);
+
+The utility function C<nbdkit_realpath> converts any path to an
+absolute path, resolving symlinks.  Under the hood it uses the
+C<realpath> function, and thus it fails if the path does not exist,
+or it is not possible to access to any of the components of the path.
+
+Note that this function works I<only> when used in the C<.config>, and
+C<.config_complete> callbacks.
+
+If the path resolution was not possible, this calls C<nbdkit_error>
+and returns C<NULL>.
+
+The returned string must be freed by the caller.
+
+=head2 umask
+
+All plugins will see a L<umask(2)> of C<0022>.
 
 =head1 CALLBACKS
 
@@ -265,15 +376,20 @@ optional list of C<key=value> arguments.  These are passed to the
 plugin through this callback when the plugin is first loaded and
 before any connections are accepted.
 
-This callback may be called zero or more times.  Both C<key> and
-C<value> parameters will be non-NULL, but it is possible for either to
-be empty strings.  The strings are owned by nbdkit but will remain
-valid for the lifetime of the plugin, so the plugin does not need to
-copy them.
+This callback may be called zero or more times.
 
-The format of the C<key> accepted by plugins is up to the plugin, but
-you should probably look at other plugins and follow the same
-conventions.
+Both C<key> and C<value> parameters will be non-NULL.  The strings are
+owned by nbdkit but will remain valid for the lifetime of the plugin,
+so the plugin does not need to copy them.
+
+The key will be a non-empty string beginning with an ASCII alphabetic
+character (C<A-Z> C<a-z>).  The rest of the key must contain only
+ASCII alphanumeric plus period, underscore or dash characters (C<A-Z>
+C<a-z> C<0-9> C<.> C<_> C<->).  The value may be an arbitrary string,
+including an empty string.
+
+The names of C<key>s accepted by plugins is up to the plugin, but you
+should probably look at other plugins and follow the same conventions.
 
 If the value is a relative path, then note that the server changes
 directory when it starts up.  See L</FILENAMES AND PATHS> above.
@@ -284,6 +400,23 @@ with an error.
 
 If there is an error, C<.config> should call C<nbdkit_error> with an
 error message and return C<-1>.
+
+=head2 C<.magic_config_key>
+
+ const char *magic_config_key;
+
+This optional string can be used to set a "magic" key used when
+parsing plugin parameters.  It affects how "bare parameters" (those
+which do not contain an C<=> character) are parsed on the command
+line.
+
+If C<magic_config_key != NULL> then any bare parameters are passed to
+the C<.config> method as: S<C<config (magic_config_key, argv[i]);>>.
+
+If C<magic_config_key> is not set then we behave as in nbdkit E<lt>
+1.7: If the first parameter on the command line is bare then it is
+passed to the C<.config> method as: S<C<config ("script", value);>>.
+Any other bare parameters give errors.
 
 =head2 C<.config_complete>
 
@@ -407,15 +540,61 @@ error message and return C<-1>.
 This callback is not required.  If omitted, then we return true iff a
 C<.trim> callback has been defined.
 
+=head2 C<.can_zero>
+
+ int can_zero (void *handle);
+
+This is called during the option negotiation phase to find out if the
+plugin wants the C<.zero> callback to be utilized.  Support for
+writing zeros is still advertised to the client (unless the nbdkit
+filter nozero is also used), so returning false merely serves as a way
+to avoid complicating the C<.zero> callback to have to fail with
+C<EOPNOTSUPP> on the connections where it will never be more efficient
+than using C<.pwrite> up front.
+
+If there is an error, C<.can_zero> should call C<nbdkit_error> with an
+error message and return C<-1>.
+
+This callback is not required.  If omitted, then nbdkit always tries
+C<.zero> first if it is present, and gracefully falls back to
+C<.pwrite> if C<.zero> was absent or failed with C<EOPNOTSUPP>.
+
+=head2 C<.can_fua>
+
+ int can_fua (void *handle);
+
+This is called during the option negotiation phase to find out if the
+plugin supports the Forced Unit Access (FUA) flag on write, zero, and
+trim requests.  If this returns C<NBDKIT_FUA_NONE>, FUA support is not
+advertised to the guest; if this returns C<NBDKIT_FUA_EMULATE>, the
+C<.flush> callback must work (even if C<.can_flush> returns false),
+and FUA support is emulated by calling C<.flush> after any write
+operation; if this returns C<NBDKIT_FUA_NATIVE>, then the C<.pwrite>,
+C<.zero>, and C<.trim> callbacks (if implemented) must handle the flag
+C<NBDKIT_FLAG_FUA>, by not returning until that action has landed in
+persistent storage.
+
+If there is an error, C<.can_fua> should call C<nbdkit_error> with an
+error message and return C<-1>.
+
+This callback is not required unless a plugin wants to specifically
+handle FUA requests.  If omitted, nbdkit checks whether C<.flush>
+exists, and behaves as if this function returns C<NBDKIT_FUA_NONE> or
+C<NBDKIT_FUA_EMULATE> as appropriate.
+
 =head2 C<.pread>
 
- int pread (void *handle, void *buf, uint32_t count, uint64_t offset);
+ int pread (void *handle, void *buf, uint32_t count, uint64_t offset,
+            uint32_t flags);
 
 During the data serving phase, nbdkit calls this callback to read data
 from the backing store.  C<count> bytes starting at C<offset> in the
 backing store should be read and copied into C<buf>.  nbdkit takes
 care of all bounds- and sanity-checking, so the plugin does not need
 to worry about that.
+
+The parameter C<flags> exists in case of future NBD protocol
+extensions; at this time, it will be 0 on input.
 
 The callback must read the whole C<count> bytes if it can.  The NBD
 protocol doesn't allow partial reads (instead, these would be errors).
@@ -429,13 +608,18 @@ message, and C<nbdkit_set_error> to record an appropriate error
 
 =head2 C<.pwrite>
 
- int pwrite (void *handle, const void *buf, uint32_t count, uint64_t offset);
+ int pwrite (void *handle, const void *buf, uint32_t count, uint64_t offset,
+             uint32_t flags);
 
 During the data serving phase, nbdkit calls this callback to write
 data to the backing store.  C<count> bytes starting at C<offset> in
 the backing store should be written using the data in C<buf>.  nbdkit
 takes care of all bounds- and sanity-checking, so the plugin does not
 need to worry about that.
+
+This function will not be called if C<.can_write> returned false.  The
+parameter C<flags> may include C<NBDKIT_FLAG_FUA> on input based on
+the result of C<.can_fua>.
 
 The callback must write the whole C<count> bytes if it can.  The NBD
 protocol doesn't allow partial writes (instead, these would be
@@ -449,12 +633,18 @@ message, and C<nbdkit_set_error> to record an appropriate error
 
 =head2 C<.flush>
 
- int flush (void *handle);
+ int flush (void *handle, uint32_t flags);
 
 During the data serving phase, this callback is used to
 L<fdatasync(2)> the backing store, ie. to ensure it has been
 completely written to a permanent medium.  If that is not possible
 then you can omit this callback.
+
+This function will not be called directly by the client if
+C<.can_flush> returned false; however, it may still be called by
+nbdkit if C<.can_fua> returned C<NBDKIT_FUA_EMULATE>.  The parameter
+C<flags> exists in case of future NBD protocol extensions; at this
+time, it will be 0 on input.
 
 If there is an error, C<.flush> should call C<nbdkit_error> with an
 error message, and C<nbdkit_set_error> to record an appropriate error
@@ -462,11 +652,15 @@ error message, and C<nbdkit_set_error> to record an appropriate error
 
 =head2 C<.trim>
 
- int trim (void *handle, uint32_t count, uint64_t offset);
+ int trim (void *handle, uint32_t count, uint64_t offset, uint32_t flags);
 
 During the data serving phase, this callback is used to "punch holes"
 in the backing store.  If that is not possible then you can omit this
 callback.
+
+This function will not be called if C<.can_trim> returned false.  The
+parameter C<flags> may include C<NBDKIT_FLAG_FUA> on input based on
+the result of C<.can_fua>.
 
 If there is an error, C<.trim> should call C<nbdkit_error> with an
 error message, and C<nbdkit_set_error> to record an appropriate error
@@ -474,15 +668,21 @@ error message, and C<nbdkit_set_error> to record an appropriate error
 
 =head2 C<.zero>
 
- int zero (void *handle, uint32_t count, uint64_t offset, int may_trim);
+ int zero (void *handle, uint32_t count, uint64_t offset, uint32_t flags);
 
 During the data serving phase, this callback is used to write C<count>
-bytes of zeroes at C<offset> in the backing store.  If C<may_trim> is
-non-zero, the operation can punch a hole instead of writing actual
-zero bytes, but only if subsequent reads from the hole read as zeroes.
-If this callback is omitted, or if it fails with C<EOPNOTSUPP>
-(whether by C<nbdkit_set_error> or C<errno>), then C<.pwrite> will be
-used instead.
+bytes of zeroes at C<offset> in the backing store.
+
+This function will not be called if C<.can_zero> returned false.  On
+input, the parameter C<flags> may include C<NBDKIT_FLAG_MAY_TRIM>
+unconditionally, and C<NBDKIT_FLAG_FUA> based on the result of
+C<.can_fua>.
+
+If C<NBDKIT_FLAG_MAY_TRIM> is requested, the operation can punch a
+hole instead of writing actual zero bytes, but only if subsequent
+reads from the hole read as zeroes.  If this callback is omitted, or
+if it fails with C<EOPNOTSUPP> (whether by C<nbdkit_set_error> or
+C<errno>), then C<.pwrite> will be used instead.
 
 The callback must write the whole C<count> bytes if it can.  The NBD
 protocol doesn't allow partial writes (instead, these would be
@@ -563,6 +763,17 @@ size strings such as "100M" into the size in bytes.
 C<str> can be a string in a number of common formats.  The function
 returns the size in bytes.  If there was an error, it returns C<-1>.
 
+=head1 PARSING BOOLEAN PARAMETERS
+
+Use the C<nbdkit_parse_bool> utility function to parse human-readable
+strings such as "on" into a boolean value.
+
+ int nbdkit_parse_bool (const char *str);
+
+C<str> can be a string containing a case-insensitive form of various
+common toggle values.  The function returns 0 or 1 if the parse was
+successful.  If there was an error, it returns C<-1>.
+
 =head1 READING PASSWORDS
 
 The C<nbdkit_read_password> utility function can be used to read
@@ -624,6 +835,36 @@ For convenience, C<nbdkit_debug> preserves the value of C<errno>.
 Note that C<nbdkit_debug> only prints things when the server is in
 verbose mode (I<-v> option).
 
+=head2 Debug Flags
+
+The I<-v> option switches general debugging on or off, and this
+debugging should be used for messages which are useful for all users
+of your plugin.
+
+In cases where you want to enable specific extra debugging to track
+down bugs in plugins or filters — mainly for use by the plugin/filter
+developers themselves — you can define Debug Flags.  These are global
+ints called C<myplugin_debug_*>:
+
+ int myplugin_debug_foo;
+ int myplugin_debug_bar;
+ ...
+ if (myplugin_debug_foo) {
+   nbdkit_debug ("lots of extra debugging about foo: ...");
+ }
+
+Debug Flags can be controlled on the command line using the I<-D> (or
+I<--debug>) option:
+
+ nbdkit -f -v -D myplugin.foo=1 -D myplugin.bar=2 myplugin [...]
+
+Note C<myplugin> is the name passed to C<.name> in the C<struct
+nbdkit_plugin>.
+
+You should only use this feature for debug settings.  For general
+settings use ordinary plugin parameters.  Debug Flags can only be C
+ints.  They are not supported by non-C language plugins.
+
 =head1 INSTALLING THE PLUGIN
 
 The plugin is a C<*.so> file and possibly a manual page.  You can of
@@ -676,14 +917,18 @@ which defines C<$(NBDKIT_PLUGINDIR)> in automake-generated Makefiles.
 
 =head1 WRITING PLUGINS IN OTHER PROGRAMMING LANGUAGES
 
-You can also write nbdkit plugins in OCaml, Perl, Python or Ruby.
-Other programming languages may be offered in future.
+You can also write nbdkit plugins in Lua, OCaml, Perl, Python, Ruby,
+shell script or Tcl.  Other programming languages may be offered in
+future.
 
 For more information see:
+L<nbdkit-lua-plugin(3)>,
 L<nbdkit-ocaml-plugin(3)>,
 L<nbdkit-perl-plugin(3)>,
 L<nbdkit-python-plugin(3)>,
-L<nbdkit-ruby-plugin(3)>.
+L<nbdkit-ruby-plugin(3)>,
+L<nbdkit-sh-plugin(3)>,
+L<nbdkit-tcl-plugin(3)>.
 
 Plugins written in scripting languages may also be installed in
 C<$plugindir>.  These must be called C<nbdkit-I<name>-plugin> without
@@ -703,15 +948,11 @@ and then users will be able to run it like this:
 =head1 SEE ALSO
 
 L<nbdkit(1)>,
-L<nbdkit-filter(3)>,
-L<nbdkit-example1-plugin(1)>,
-L<nbdkit-example2-plugin(1)>,
-L<nbdkit-example3-plugin(1)>,
-L<nbdkit-example4-plugin(1)>,
-L<nbdkit-ocaml-plugin(3)>,
-L<nbdkit-perl-plugin(3)>,
-L<nbdkit-python-plugin(3)>,
-L<nbdkit-ruby-plugin(3)>.
+L<nbdkit-filter(3)>.
+
+Standard plugins provided by nbdkit:
+
+__PLUGIN_LINKS__.
 
 =head1 AUTHORS
 
@@ -724,43 +965,3 @@ Pino Toscano
 =head1 COPYRIGHT
 
 Copyright (C) 2013-2018 Red Hat Inc.
-
-=head1 LICENSE
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are
-met:
-
-=over 4
-
-=item *
-
-Redistributions of source code must retain the above copyright
-notice, this list of conditions and the following disclaimer.
-
-=item *
-
-Redistributions in binary form must reproduce the above copyright
-notice, this list of conditions and the following disclaimer in the
-documentation and/or other materials provided with the distribution.
-
-=item *
-
-Neither the name of Red Hat nor the names of its contributors may be
-used to endorse or promote products derived from this software without
-specific prior written permission.
-
-=back
-
-THIS SOFTWARE IS PROVIDED BY RED HAT AND CONTRIBUTORS ''AS IS'' AND
-ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
-THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
-PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL RED HAT OR
-CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
-USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
-ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
-OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
-SUCH DAMAGE.

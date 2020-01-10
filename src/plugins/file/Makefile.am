@@ -30,11 +30,9 @@
 # OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 # SUCH DAMAGE.
 
+include $(top_srcdir)/common-rules.mk
+
 EXTRA_DIST = nbdkit-file-plugin.pod
-
-CLEANFILES = *~
-
-plugindir = $(libdir)/nbdkit/plugins
 
 plugin_LTLIBRARIES = nbdkit-file-plugin.la
 
@@ -43,20 +41,21 @@ nbdkit_file_plugin_la_SOURCES = \
 	$(top_srcdir)/include/nbdkit-plugin.h
 
 nbdkit_file_plugin_la_CPPFLAGS = \
-	-I$(top_srcdir)/include
+	-I$(top_srcdir)/include \
+	-I$(top_srcdir)/common/include
 nbdkit_file_plugin_la_CFLAGS = \
 	$(WARNINGS_CFLAGS)
 nbdkit_file_plugin_la_LDFLAGS = \
 	-module -avoid-version -shared
 
-if HAVE_POD2MAN
+if HAVE_POD
 
 man_MANS = nbdkit-file-plugin.1
 CLEANFILES += $(man_MANS)
 
 nbdkit-file-plugin.1: nbdkit-file-plugin.pod
-	$(POD2MAN) $(POD2MAN_ARGS) --section=1 --name=`basename $@ .1` $< $@.t && \
-	if grep 'POD ERROR' $@.t; then rm $@.t; exit 1; fi && \
-	mv $@.t $@
+	$(PODWRAPPER) --section=1 --man $@ \
+	    --html $(top_builddir)/html/$@.html \
+	    $<
 
-endif
+endif HAVE_POD

@@ -1,0 +1,89 @@
+=head1 NAME
+
+nbdkit-ext2-plugin - read and write files inside ext2, ext3 or
+ext4 filesystems
+
+=head1 SYNOPSIS
+
+ nbdkit ext2 disk=fs.img file=/disks/disk.raw
+
+ nbdkit --filter=partition ext2 \
+                           disk=disk.img file=/disks/disk.raw \
+                           partition=1
+
+=head1 DESCRIPTION
+
+C<nbdkit-ext2-plugin> is an nbdkit plugin which can read and
+write files inside ext2, ext3 or ext4 filesystem images.
+
+Suppose you have an ext2/3/4 filesystem image called F<fs.img>
+which contains inside itself a file called F<disk.raw>
+inside a directory on the filesystem called F</disks>, then
+you could serve that file over NBD using:
+
+ nbdkit ext2 disk=fs.img file=/disks/disk.raw
+
+Commonly disk images are partitioned.  In that case you must
+use L<nbdkit-partition-filter(1)> to select the partition:
+
+ nbdkit --filter=partition ext2 disk=.. file=.. partition=1
+
+This plugin can both read and write to the file inside the filesystem.
+Use the I<-r> flag to force a readonly connection, but note this does
+I<not> guarantee that no writes are made to the filesystem.  In
+particular we may have to replay the ext3 journal in order to open a
+filesystem even read-only.
+
+The plugin does I<not> support multiple parallel connections, because
+there is a risk of corrupting the filesystem (as if the filesystem was
+mounted by multiple machines).  If a second connection is made to
+nbdkit, it will block until the first connection closes.
+
+The plugin is implemented using the ext2fs library which is provided
+in most Linux distros, and also available as part of the e2fsprogs
+project.
+
+L<nbdkit-guestfs-plugin(1)> is a more generic plugin which can read
+files from all kinds of different filesystem types, even if they are
+partitioned or use logical volumes.  It uses libguestfs instead of
+e2fsprogs.
+
+=head1 PARAMETERS
+
+=over 4
+
+=item B<disk=>FILENAME
+
+The ext2, ext3 or ext4 filesystem, a file on the host.
+
+You could also use a device name here if the filesystem is located on
+a device.  Be careful that the filesystem is not being accessed in
+parallel by another program and is not mounted, as that will almost
+certainly result in disk corruption in the filesystem.
+
+The plugin expects a raw filesystem.  If the file/device is
+partitioned, use L<nbdkit-partition-filter(1)>.
+
+=item B<file=>PATH
+
+The full path of the file within the filesystem that will be exposed
+over NBD.  The path must be absolute (starts with C</>).
+
+=back
+
+=head1 SEE ALSO
+
+L<nbdkit(1)>,
+L<nbdkit-plugin(3)>,
+L<nbdkit-partition-filter(1)>,
+L<nbdkit-guestfs-plugin(1)>,
+L<http://e2fsprogs.sourceforge.net/>,
+L<fuse2fs(1)>.
+
+=head1 AUTHORS
+
+Richard W.M. Jones
+
+=head1 COPYRIGHT
+
+Copyright (C) 2018 Red Hat Inc.

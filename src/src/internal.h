@@ -40,6 +40,7 @@
 #include <sys/socket.h>
 #include <pthread.h>
 
+#define NBDKIT_API_VERSION 2
 #include "nbdkit-plugin.h"
 #include "nbdkit-filter.h"
 
@@ -57,40 +58,14 @@
 #define SOCK_CLOEXEC 0
 #endif
 
-#ifndef htobe32
-#include <byteswap.h>
-# if __BYTE_ORDER == __LITTLE_ENDIAN
-#  define htobe16(x) __bswap_16 (x)
-#  define htole16(x) (x)
-#  define be16toh(x) __bswap_16 (x)
-#  define le16toh(x) (x)
-
-#  define htobe32(x) __bswap_32 (x)
-#  define htole32(x) (x)
-#  define be32toh(x) __bswap_32 (x)
-#  define le32toh(x) (x)
-
-#  define htobe64(x) __bswap_64 (x)
-#  define htole64(x) (x)
-#  define be64toh(x) __bswap_64 (x)
-#  define le64toh(x) (x)
-
-# else
-#  define htobe16(x) (x)
-#  define htole16(x) __bswap_16 (x)
-#  define be16toh(x) (x)
-#  define le16toh(x) __bswap_16 (x)
-
-#  define htobe32(x) (x)
-#  define htole32(x) __bswap_32 (x)
-#  define be32toh(x) (x)
-#  define le32toh(x) __bswap_32 (x)
-
-#  define htobe64(x) (x)
-#  define htole64(x) __bswap_64 (x)
-#  define be64toh(x) (x)
-#  define le64toh(x) __bswap_64 (x)
-# endif
+#if HAVE_VALGRIND
+# include <valgrind.h>
+/* http://valgrind.org/docs/manual/faq.html#faq.unhelpful */
+# define DO_DLCLOSE !RUNNING_ON_VALGRIND
+#elif defined(__SANITIZE_ADDRESS__)
+# define DO_DLCLOSE 0
+#else
+# define DO_DLCLOSE 1
 #endif
 
 #define container_of(ptr, type, member) ({                       \
@@ -98,18 +73,34 @@
       (type *) ((char *) __mptr - offsetof(type, member));       \
     })
 
-#define NBDKIT_FLAG_MAY_TRIM (1<<0) /* Maps to !NBD_CMD_FLAG_NO_HOLE */
-#define NBDKIT_FLAG_FUA      (1<<1) /* Maps to NBD_CMD_FLAG_FUA */
-
 /* main.c */
+struct debug_flag {
+  struct debug_flag *next;
+  char *name;                   /* plugin or filter name */
+  char *flag;                   /* flag name */
+  int value;                    /* value of flag */
+  int used;                     /* if flag was successfully set */
+};
+
+enum log_to {
+  LOG_TO_DEFAULT,        /* --log not specified: log to stderr, unless
+                            we forked into the background in which
+                            case log to syslog */
+  LOG_TO_STDERR,         /* --log=stderr forced on the command line */
+  LOG_TO_SYSLOG,         /* --log=syslog forced on the command line */
+};
+
+extern struct debug_flag *debug_flags;
 extern const char *exportname;
 extern const char *ipaddr;
+extern enum log_to log_to;
 extern int newstyle;
 extern const char *port;
 extern int readonly;
 extern const char *selinux_label;
 extern int tls;
 extern const char *tls_certificates_dir;
+extern const char *tls_psk;
 extern int tls_verify_peer;
 extern char *unixsocket;
 extern int verbose;
@@ -117,6 +108,8 @@ extern int threads;
 
 extern volatile int quit;
 extern int quit_fd;
+
+extern int forked_into_background;
 
 extern struct backend *backend;
 #define for_each_backend(b) for (b = backend; b != NULL; b = b->next)
@@ -151,8 +144,12 @@ extern void crypto_init (int tls_set_on_cli);
 extern void crypto_free (void);
 extern int crypto_negotiate_tls (struct connection *conn, int sockin, int sockout);
 
-/* errors.c */
+/* debug.c */
 #define debug nbdkit_debug
+
+/* log-*.c */
+void log_stderr_verror (const char *fs, va_list args);
+void log_syslog_verror (const char *fs, va_list args);
 
 struct backend {
   /* Next filter or plugin in the chain.  This is always NULL for
@@ -176,25 +173,35 @@ struct backend {
   void (*dump_fields) (struct backend *);
   void (*config) (struct backend *, const char *key, const char *value);
   void (*config_complete) (struct backend *);
-  int (*errno_is_preserved) (struct backend *);
+  const char *(*magic_config_key) (struct backend *);
   int (*open) (struct backend *, struct connection *conn, int readonly);
   int (*prepare) (struct backend *, struct connection *conn);
   int (*finalize) (struct backend *, struct connection *conn);
   void (*close) (struct backend *, struct connection *conn);
+
   int64_t (*get_size) (struct backend *, struct connection *conn);
   int (*can_write) (struct backend *, struct connection *conn);
   int (*can_flush) (struct backend *, struct connection *conn);
   int (*is_rotational) (struct backend *, struct connection *conn);
   int (*can_trim) (struct backend *, struct connection *conn);
-  int (*pread) (struct backend *, struct connection *conn, void *buf, uint32_t count, uint64_t offset, uint32_t flags);
-  int (*pwrite) (struct backend *, struct connection *conn, const void *buf, uint32_t count, uint64_t offset, uint32_t flags);
-  int (*flush) (struct backend *, struct connection *conn, uint32_t flags);
-  int (*trim) (struct backend *, struct connection *conn, uint32_t count, uint64_t offset, uint32_t flags);
-  int (*zero) (struct backend *, struct connection *conn, uint32_t count, uint64_t offset, uint32_t flags);
+  int (*can_zero) (struct backend *, struct connection *conn);
+  int (*can_fua) (struct backend *, struct connection *conn);
+
+  int (*pread) (struct backend *, struct connection *conn, void *buf,
+                uint32_t count, uint64_t offset, uint32_t flags, int *err);
+  int (*pwrite) (struct backend *, struct connection *conn, const void *buf,
+                 uint32_t count, uint64_t offset, uint32_t flags, int *err);
+  int (*flush) (struct backend *, struct connection *conn, uint32_t flags,
+                int *err);
+  int (*trim) (struct backend *, struct connection *conn, uint32_t count,
+               uint64_t offset, uint32_t flags, int *err);
+  int (*zero) (struct backend *, struct connection *conn, uint32_t count,
+               uint64_t offset, uint32_t flags, int *err);
 };
 
 /* plugins.c */
 extern struct backend *plugin_register (size_t index, const char *filename, void *dl, struct nbdkit_plugin *(*plugin_init) (void));
+extern void set_debug_flags (void *dl, const char *name);
 
 /* filters.c */
 extern struct backend *filter_register (struct backend *next, size_t index, const char *filename, void *dl, struct nbdkit_filter *(*filter_init) (void));

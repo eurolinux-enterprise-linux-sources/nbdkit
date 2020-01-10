@@ -1,5 +1,5 @@
 # nbdkit
-# Copyright (C) 2013-2017 Red Hat Inc.
+# Copyright (C) 2013-2018 Red Hat Inc.
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
@@ -30,7 +30,7 @@
 # OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 # SUCH DAMAGE.
 
-AC_INIT([nbdkit], [1.2.6])
+AC_INIT([nbdkit], [1.8.0])
 AC_CONFIG_MACRO_DIR([m4])
 m4_ifdef([AC_USE_SYSTEM_EXTENSIONS],[],
          [m4_define([AC_USE_SYSTEM_EXTENSIONS],[])])
@@ -41,6 +41,10 @@ dnl NB: Do not [quote] this parameter.
 AM_INIT_AUTOMAKE(foreign)
 AC_PROG_LIBTOOL
 LT_INIT
+
+AC_CANONICAL_HOST
+
+AC_PROG_SED
 
 dnl Check for basic C environment.
 AC_PROG_CC_STDC
@@ -78,8 +82,28 @@ if test "x$gcc_warnings" = "xyes"; then
     AC_SUBST([WARNINGS_CFLAGS])
 fi
 
+dnl on Haiku we must use BSD-compatibility headers to get the endian macros we use
+AC_MSG_CHECKING(whether OS-dependent include paths are required)
+AS_CASE([$host_os],
+  [haiku*], [CFLAGS="$CFLAGS -I`findpaths -p /system B_FIND_PATH_HEADERS_DIRECTORY`/bsd"; AC_MSG_RESULT(yes)],
+  [AC_MSG_RESULT(no)]
+)
+
+dnl On Linux /tmp is often tmpfs which is not large enough, so use /var/tmp.
+dnl But Haiku only has /tmp.
+AC_MSG_CHECKING([for temporary directory for large files])
+AS_CASE([$host_os],
+  [haiku*], [LARGE_TMPDIR=/tmp],
+  [LARGE_TMPDIR=/var/tmp]
+)
+AC_MSG_RESULT([$LARGE_TMPDIR])
+AC_DEFINE_UNQUOTED([LARGE_TMPDIR],["$LARGE_TMPDIR"],
+                   [Temporary directory for large files])
+
 dnl Check if libc has program_invocation_short_name.
 AC_CHECK_DECLS([program_invocation_short_name], [], [], [#include <errno.h>])
+
+AX_PTHREAD
 
 dnl Check if __attribute__((cleanup(...))) works.
 dnl Set -Werror, otherwise gcc will only emit a warning for attributes
@@ -127,7 +151,97 @@ dnl restore CFLAGS
 CFLAGS="${acx_nbdkit_save_CFLAGS}"
 
 dnl Check for other headers, all optional.
-AC_CHECK_HEADERS([selinux/selinux.h sys/prctl.h])
+AC_CHECK_HEADERS([\
+	alloca.h \
+	byteswap.h \
+	endian.h \
+	selinux/selinux.h \
+	sys/endian.h \
+	sys/prctl.h \
+	sys/procctl.h])
+
+dnl Check for functions in libc, all optional.
+AC_CHECK_FUNCS([\
+	fdatasync \
+	get_current_dir_name \
+	mkostemp])
+
+old_LIBS="$LIBS"
+AC_SEARCH_LIBS([dlopen], [dl dld], [
+        AS_IF([test "x$ac_cv_search_dlopen" != "xnone required"],
+	    [DL_LIBS="$ac_cv_search_dlopen"], [DL_LIBS=])
+        AC_SUBST([DL_LIBS])
+    ], [AC_MSG_ERROR([unable to find the dlopen() function])
+])
+LIBS="$old_LIBS"
+
+dnl Test if <iconv.h> header can build working binaries.
+dnl
+dnl On FreeBSD: iconv and libiconv both exist, both can be installed
+dnl simultaneously, <iconv.h> can exist in two separate places, and
+dnl if you get the wrong header/library mix everything breaks.
+dnl
+dnl On Haiku: libiconv is required to link to iconv_* functions.
+AC_ARG_WITH([iconv],
+    AS_HELP_STRING([--without-iconv], [Don't try to link against iconv]),
+    [],
+    [with_iconv=check])
+AS_IF([test "x$with_iconv" != "xno"],[
+    AC_CHECK_HEADER([iconv.h],[
+        AC_MSG_CHECKING([if <iconv.h> can be used to link a program])
+        AC_LINK_IFELSE([
+AC_LANG_SOURCE([[
+#include <stdio.h>
+#include <stdlib.h>
+#include <iconv.h>
+int
+main (int argc, char *argv[])
+{
+  iconv_t ic = iconv_open ("", "");
+  iconv_close (ic);
+  exit (0);
+}
+]])
+            ],[
+            AC_MSG_RESULT([yes])
+            iconv_working=yes
+            ],[
+            AC_MSG_RESULT([no])
+            ])
+        ])
+    ])
+AM_CONDITIONAL([HAVE_ICONV], [test "x$iconv_working" = "xyes"])
+
+dnl Check if -rdynamic linker flag works.
+acx_nbdkit_save_LDFLAGS="${LDFLAGS}"
+LDFLAGS="${LDFLAGS} -rdynamic"
+AC_MSG_CHECKING([if linker supports -rdynamic])
+AC_LINK_IFELSE([
+AC_LANG_SOURCE([[
+#include <stdlib.h>
+int
+main (int argc, char *argv[])
+{
+  exit (EXIT_SUCCESS);
+}
+]])
+    ],[
+    AC_MSG_RESULT([yes])
+    DL_LDFLAGS=-rdynamic
+    ],[
+    AC_MSG_RESULT([no])
+])
+dnl restore CFLAGS
+LDFLAGS="${acx_nbdkit_save_LDFLAGS}"
+AC_SUBST([DL_LDFLAGS])
+
+dnl Check for dladdr in -ldl, optional.  This is a glibc extension.
+old_LIBS="$LIBS"
+LIBS="$DL_LIBS $LIBS"
+AC_CHECK_FUNCS([dladdr])
+LIBS="$old_LIBS"
+
+AC_SEARCH_LIBS([getaddrinfo], [network socket])
 
 dnl Check support for setsockcreatecon_raw (part of SELinux).
 AC_CHECK_LIB([selinux], [setsockcreatecon_raw], [], [:])
@@ -156,6 +270,7 @@ AS_IF([test "$GNUTLS_LIBS" != ""],[
     old_LIBS="$LIBS"
     LIBS="$GNUTLS_LIBS $LIBS"
     AC_CHECK_FUNCS([\
+	gnutls_base64_decode2 \
 	gnutls_certificate_set_known_dh_params \
 	gnutls_session_set_verify_cert])
     LIBS="$old_LIBS"
@@ -164,28 +279,66 @@ AS_IF([test "$GNUTLS_LIBS" != ""],[
 dnl Check for valgrind.
 AC_CHECK_PROG([VALGRIND],[valgrind],[valgrind],[no])
 
-dnl Check for Perl POD.
-AC_CHECK_PROG([POD2MAN], [pod2man], [pod2man], [no])
-AS_IF([test "x$POD2MAN" != "xno"],[
-    POD2MAN_ARGS="--center=nbdkit --release=nbdkit"
-    # Check whether pod2man supports --utf8, and if so add it to $POD2MAN_ARGS.
-    AC_MSG_CHECKING([if $POD2MAN supports --utf8])
-    AS_IF([$POD2MAN --help 2>&1 | grep -s -q -- --utf8],[
-        AC_MSG_RESULT([yes])
-	POD2MAN_ARGS="$POD2MAN_ARGS --utf8"
+dnl If valgrind headers are available (optional).
+dnl Since this is only useful for developers, you have to enable
+dnl it explicitly using --enable-valgrind.
+AC_ARG_ENABLE([valgrind],
+    AS_HELP_STRING([--enable-valgrind], [enable Valgrind extensions, for developers]),
+    [enable_valgrind=yes],
+    [enable_valgrind=no])
+AS_IF([test "x$enable_valgrind" = "xyes"],[
+    PKG_CHECK_MODULES([VALGRIND], [valgrind], [
+        AC_SUBST([VALGRIND_CFLAGS])
+        AC_SUBST([VALGRIND_LIBS])
+        AC_DEFINE([HAVE_VALGRIND],[1],[Valgrind headers found at compile time])
     ],[
-        AC_MSG_RESULT([no])
+        AC_MSG_ERROR([--enable-valgrind given, but Valgrind headers are not available])
     ])
-    AC_SUBST([POD2MAN_ARGS])
 ])
-AM_CONDITIONAL([HAVE_POD2MAN], [test "x$POD2MAN" != "xno"])
 
+dnl Bash completion.
+PKG_CHECK_MODULES([BASH_COMPLETION], [bash-completion >= 2.0], [
+    bash_completion=yes
+    AC_MSG_CHECKING([for bash-completions directory])
+    m4_ifdef([PKG_CHECK_VAR],[
+        PKG_CHECK_VAR(bashcompdir, [bash-completion], [completionsdir])
+    ])
+    AS_IF([test -z "$bashcompdir"], [
+        bashcompdir="${sysconfdir}/bash_completion.d"
+    ])
+    AC_MSG_RESULT([$bashcompdir])
+    AC_SUBST([bashcompdir])
+],[
+    bash_completion=no
+    AC_MSG_WARN([bash-completion not installed])
+])
+AM_CONDITIONAL([HAVE_BASH_COMPLETION],[test "x$bash_completion" = "xyes"])
+
+dnl Check we have enough to run podwrapper.
+AC_CHECK_PROG([PERL],[perl],[perl],[no])
+AS_IF([test "x$PERL" != "xno"],[
+    AC_MSG_CHECKING([if we have perl Pod::Man and Pod::Simple])
+    AS_IF([$PERL -MPod::Man -MPod::Simple -e 1 >&AS_MESSAGE_LOG_FD 2>&1],[
+        enable_pod=yes
+    ],[
+        enable_pod=no
+    ])
+    AC_MSG_RESULT([$enable_pod])
+])
+AM_CONDITIONAL([HAVE_POD],
+               [test "x$PERL" != "xno" && test "x$enable_pod" = "xyes"])
+
+dnl Define the path to the podwrapper program.
+PODWRAPPER="$PERL $(pwd)/podwrapper.pl"
+AC_SUBST([PODWRAPPER])
+
+dnl Allow all plugins and filters to be disabled.
 AC_ARG_ENABLE([plugins],
     [AS_HELP_STRING([--disable-plugins], [disable all bundled plugins and filters])])
 AM_CONDITIONAL([HAVE_PLUGINS], [test "x$enable_plugins" != "xno"])
 
 dnl Check for Perl, for embedding in the perl plugin.
-AC_CHECK_PROG([PERL],[perl],[perl],[no])
+dnl Note that the perl binary is checked above.
 AC_ARG_ENABLE([perl],
     AS_HELP_STRING([--disable-perl], [disable Perl embed plugin]),
     [],
@@ -331,6 +484,44 @@ AS_IF([test "x$RUBY" != "xno" && test "x$enable_ruby" != "xno"],[
 AM_CONDITIONAL([HAVE_RUBY],[test "x$RUBY" != "xno" &&
                             test "x$enable_ruby" = "xyes"])
 
+dnl Check for Tcl, for embedding in the Tcl plugin.
+AC_ARG_ENABLE([tcl],
+    AS_HELP_STRING([--disable-tcl], [disable Tcl plugin]),
+    [],
+    [enable_tcl=yes])
+AS_IF([test "x$enable_tcl" != "xno"],[
+    PKG_CHECK_MODULES([TCL], [tcl], [
+        AC_SUBST([TCL_CFLAGS])
+        AC_SUBST([TCL_LIBS])
+    ],[
+        AC_MSG_WARN([Tcl not found])
+        enable_tcl=no
+    ])
+])
+AM_CONDITIONAL([HAVE_TCL],[test "x$enable_tcl" = "xyes"])
+
+dnl Check for Lua, for embedding in the Lua plugin.
+AC_ARG_ENABLE([lua],
+    AS_HELP_STRING([--disable-lua], [disable Lua plugin]),
+    [],
+    [enable_lua=yes])
+AS_IF([test "x$enable_lua" != "xno"],[
+    PKG_CHECK_MODULES([LUA], [lua], [
+        AC_SUBST([LUA_CFLAGS])
+        AC_SUBST([LUA_LIBS])
+
+	dnl Lua 5.1 used by RHEL 7 does not have lua_isinteger.
+	old_LIBS="$LIBS"
+	LIBS="$LUA_LIBS $LIBS"
+	AC_CHECK_FUNCS([lua_isinteger])
+	LIBS="$old_LIBS"
+    ],[
+        AC_MSG_WARN([Lua not found])
+        enable_lua=no
+    ])
+])
+AM_CONDITIONAL([HAVE_LUA],[test "x$enable_lua" = "xyes"])
+
 dnl Check for curl (only if you want to compile the curl plugin).
 AC_ARG_WITH([curl],[
     AS_HELP_STRING([--without-curl],
@@ -346,6 +537,32 @@ AS_IF([test "$with_curl" != "no"],[
     [AC_MSG_WARN([curl not found, curl plugin will be disabled])])
 ])
 AM_CONDITIONAL([HAVE_CURL],[test "x$CURL_LIBS" != "x"])
+
+dnl Check for genisoimage or mkisofs
+dnl (only if you want to compile the iso plugin).
+ISOPROG="no"
+AC_ARG_WITH([iso],[
+    AS_HELP_STRING([--without-iso],
+                   [disable iso plugin @<:@default=check@:>@])],
+    [],
+    [with_iso=check])
+AS_IF([test "$with_iso" != "no"],[
+    AC_CHECK_PROG([GENISOIMAGE],[genisoimage],[genisoimage],[no])
+    AC_CHECK_PROG([MKISOFS],[mkisofs],[mkisofs],[no])
+    AS_IF([test "x$GENISOIMAGE" != "xno"],[
+        ISOPROG="$GENISOIMAGE"
+    ],[
+        AS_IF([test "x$MKISOFS" != "xno"],[
+            ISOPROG="$MKISOFS"
+        ])
+    ])
+    AS_IF([test "x$ISOPROG" != "xno"],[
+        AC_DEFINE_UNQUOTED([ISOPROG],["$ISOPROG"],
+                           [Program used by iso plugin to make ISOs.])
+    ])
+])
+AC_SUBST([ISOPROG])
+AM_CONDITIONAL([HAVE_ISO],[test "x$ISOPROG" != "xno"])
 
 dnl Check for libvirt (only if you want to compile the libvirt plugin).
 AC_ARG_WITH([libvirt],[
@@ -426,119 +643,155 @@ dnl Check for guestfish (only needed for some of the tests).
 AC_CHECK_PROG([GUESTFISH], [guestfish], [guestfish], [no])
 AM_CONDITIONAL([HAVE_GUESTFISH], [test "x$GUESTFISH" != "xno"])
 
-dnl Check for qemu-io (only needed for some of the tests).
-AC_CHECK_PROG([QEMU_IO], [qemu-io], [qemu-io], [no])
-AM_CONDITIONAL([HAVE_QEMU_IO], [test "x$QEMU_IO" != "xno"])
-
-dnl See plugins/vddk/README.VDDK.
-AC_CHECK_SIZEOF([size_t])
-AS_IF([test "x$ac_cv_sizeof_size_t" = "x4"],[bits=32],[bits=64])
-AC_ARG_WITH([vddk],[
-    AS_HELP_STRING([--with-vddk],
-                   [enable VMware VDDK plugin @<:@default=no@:>@])],
+dnl Check for ext2fs and com_err, for the ext2 plugin.
+AC_ARG_WITH([ext2],[
+    AS_HELP_STRING([--without-ext2],
+                   [disable ext2 plugin @<:@default=check@:>@])],
     [],
-    [with_vddk=no])
-AS_IF([test "$with_vddk" = "yes"],[
-    VDDK_CFLAGS=
-    VDDK_LIBS="-lvixDiskLib"
-    # XXX Warning: stupid VMware API.
-    VDDK_LIBDIR="$libdir/vmware-vix-disklib"
-    AC_MSG_NOTICE([VDDK plugin enabled from $VDDK_LIBDIR])
-    ],[
-    AS_IF([test "$with_vddk" != "no"], [
-        VDDK_CFLAGS="-I$with_vddk/include"
-        VDDK_LIBS="-L$with_vddk/lib$bits -lvixDiskLib"
-        VDDK_LIBDIR="$with_vddk"
-        AC_MSG_NOTICE([VDDK plugin enabled from $with_vddk])
-        ],
-        [AC_MSG_NOTICE([VDDK plugin disabled])
-    ])
+    [with_ext2=check])
+AS_IF([test "$with_ext2" != "no"], [
+    PKG_CHECK_MODULES([EXT2FS], [ext2fs], [
+        AC_SUBST([EXT2FS_CFLAGS])
+        AC_SUBST([EXT2FS_LIBS])
+        AC_DEFINE([HAVE_EXT2FS],[1],[ext2fs found at compile time.])
+    ],
+    [AC_MSG_WARN([ext2fs not found, ext2 plugin will be disabled])])
+    PKG_CHECK_MODULES([COM_ERR], [com_err], [
+        AC_SUBST([COM_ERR_CFLAGS])
+        AC_SUBST([COM_ERR_LIBS])
+        AC_DEFINE([HAVE_COM_ERR],[1],[com_err found at compile time.])
+    ],
+    [AC_MSG_WARN([com_err not found, ext2 plugin will be disabled])])
 ])
+AM_CONDITIONAL([HAVE_EXT2],
+               [test "x$EXT2FS_LIBS" != "x" && test "x$COM_ERR_LIBS" != "x"])
 
-dnl If the VDDK plugin was enabled, compile and link a test program to make
-dnl sure the library really works.
-AS_IF([test "x$VDDK_LIBS" != "x"],[
-    # Save CFLAGS etc while we do this test.
-    acx_nbdkit_save_CFLAGS="${CFLAGS}"
-    acx_nbdkit_save_LIBS="${LIBS}"
-    CFLAGS="$CFLAGS $VDDK_CFLAGS"
-    LIBS="$VDDK_LIBS $LIBS"
+dnl Check if the user wants to disable VDDK support.
+dnl See plugins/vddk/README.VDDK.
+AC_ARG_ENABLE([vddk],[
+    AS_HELP_STRING([--disable-vddk],
+                   [disable VMware VDDK plugin])],
+    [],
+    [enable_vddk=yes])
+AM_CONDITIONAL([HAVE_VDDK], [test "x$enable_vddk" = "xyes"])
 
-    AC_MSG_CHECKING([if we can link to VDDK])
-    AC_LINK_IFELSE([
-        AC_LANG_SOURCE([[
-#include <stdio.h>
-#include <stdint.h>
-#include <vixDiskLib.h>
-
-int
-main ()
-{
-    VixDiskLib_Exit ();
-}
-]])
-    ],[
-        AC_MSG_RESULT([yes])
-    ],[
-        AC_MSG_RESULT([no])
-        AC_MSG_ERROR([could not link to VDDK, see ‘config.log’ for more information])
-    ])
-
-    dnl Check for optional fields in VixDiskLibConnectParams struct.
-    AC_CHECK_MEMBERS([VixDiskLibConnectParams.nfcHostPort, VixDiskLibConnectParams.vimApiVer],
-                    [], [], [[
-#include <stdio.h>
-#include <stdint.h>
-#include <vixDiskLib.h>
-]])
-
-    dnl Restore CFLAGS, etc.
-    CFLAGS="${acx_nbdkit_save_CFLAGS}"
-    LIBS="${acx_nbdkit_save_LIBS}"
-])
-
-AC_SUBST([VDDK_CFLAGS])
-AC_SUBST([VDDK_LIBS])
-AC_DEFINE_UNQUOTED([VDDK_LIBDIR],["$VDDK_LIBDIR"],[VDDK 'libDir'.])
-AM_CONDITIONAL([HAVE_VDDK],[test "x$VDDK_LIBS" != "x"])
+dnl List of plugins and filters.
+lang_plugins="\
+        lua \
+        ocaml \
+        perl \
+        python \
+        ruby \
+        sh \
+        tcl \
+        "
+non_lang_plugins="\
+        curl \
+        data \
+        example1 \
+        example2 \
+        example3 \
+        example4 \
+        ext2 \
+        file \
+        floppy \
+        guestfs \
+        gzip \
+        iso \
+        libvirt \
+        memory \
+        nbd \
+        null \
+        partitioning \
+        pattern \
+        random \
+        split \
+        streaming \
+        tar \
+        vddk \
+        xz \
+        zero \
+        "
+plugins="$(echo $(printf %s\\n $lang_plugins $non_lang_plugins | sort -u))"
+filters="\
+        blocksize \
+        cache \
+        cow \
+        delay \
+        error \
+        fua \
+        log \
+        nozero \
+        offset \
+        partition \
+        truncate \
+        "
+AC_SUBST([plugins])
+AC_SUBST([lang_plugins])
+AC_SUBST([non_lang_plugins])
+AC_SUBST([filters])
 
 dnl Produce output files.
 AC_CONFIG_HEADERS([config.h])
 AC_CONFIG_FILES([nbdkit],
                 [chmod +x,-w nbdkit])
+AC_CONFIG_FILES([podwrapper.pl],
+                [chmod +x,-w podwrapper.pl])
 AC_CONFIG_FILES([Makefile
+                 bash/Makefile
+                 common/include/Makefile
+                 common/regions/Makefile
+                 common/sparse/Makefile
                  docs/Makefile
                  include/Makefile
                  plugins/Makefile
                  plugins/curl/Makefile
+                 plugins/data/Makefile
                  plugins/example1/Makefile
                  plugins/example2/Makefile
                  plugins/example3/Makefile
                  plugins/example4/Makefile
+                 plugins/ext2/Makefile
                  plugins/file/Makefile
+                 plugins/floppy/Makefile
                  plugins/guestfs/Makefile
                  plugins/gzip/Makefile
+                 plugins/iso/Makefile
                  plugins/libvirt/Makefile
+                 plugins/lua/Makefile
                  plugins/memory/Makefile
                  plugins/nbd/Makefile
                  plugins/null/Makefile
                  plugins/ocaml/Makefile
+                 plugins/partitioning/Makefile
+                 plugins/pattern/Makefile
                  plugins/perl/Makefile
                  plugins/python/Makefile
+                 plugins/random/Makefile
                  plugins/ruby/Makefile
+                 plugins/sh/Makefile
                  plugins/split/Makefile
                  plugins/streaming/Makefile
                  plugins/tar/Makefile
+                 plugins/tcl/Makefile
                  plugins/vddk/Makefile
                  plugins/xz/Makefile
+                 plugins/zero/Makefile
                  filters/Makefile
+                 filters/blocksize/Makefile
                  filters/cache/Makefile
                  filters/cow/Makefile
                  filters/delay/Makefile
+                 filters/error/Makefile
+                 filters/fua/Makefile
+                 filters/log/Makefile
+                 filters/nozero/Makefile
                  filters/offset/Makefile
                  filters/partition/Makefile
+                 filters/truncate/Makefile
                  src/Makefile
                  src/nbdkit.pc
+                 tests/functions.sh
                  tests/Makefile])
 
 AC_OUTPUT

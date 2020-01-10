@@ -1,4 +1,4 @@
-#!/bin/bash -
+#!/usr/bin/env bash
 # nbdkit
 # Copyright (C) 2014 Red Hat Inc.
 # All rights reserved.
@@ -31,11 +31,46 @@
 # OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 # SUCH DAMAGE.
 
+source ./functions.sh
 set -e
 set -x
-source ./functions.sh
 
-# Test nbdkit -s option.
-# XXX Not sure what is a really good test of this.
+if ! socat -h; then
+    echo "$0: 'socat' command not available"
+    exit 77
+fi
 
-nbdkit -s example1 </dev/null
+if ! qemu-img --help >/dev/null; then
+    echo "$0: 'qemu-img' command not available"
+    exit 77
+fi
+
+files="single.sock single.disk"
+rm -f $files
+
+truncate -s 1G single.disk
+
+socat unix-listen:single.sock,reuseaddr,fork \
+    exec:'nbdkit -r -s file single.disk' &
+pid=$!
+
+cleanup ()
+{
+    kill $pid
+    rm -f $files
+}
+cleanup_fn cleanup
+
+# Wait for socat to start up and create the socket.
+for i in `seq 1 10`; do
+    if test -S single.sock; then
+        break
+    fi
+    sleep 1
+done
+if ! test -S single.sock; then
+    echo "$0: socket was not created"
+    exit 1
+fi
+
+qemu-img info nbd:unix:single.sock

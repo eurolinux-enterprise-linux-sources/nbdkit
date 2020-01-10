@@ -1,4 +1,4 @@
-#!/bin/bash -
+#!/usr/bin/env bash
 # nbdkit
 # Copyright (C) 2018 Red Hat Inc.
 # All rights reserved.
@@ -31,45 +31,19 @@
 # OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 # SUCH DAMAGE.
 
+source ./functions.sh
 set -e
 set -x
 
 files="cache.img cache.sock cache.pid"
 rm -f $files
+cleanup_fn rm -f $files
 
 # Create an empty base image.
 truncate -s 1G cache.img
 
 # Run nbdkit with the caching filter.
-nbdkit -P cache.pid -U cache.sock --filter=cache file file=cache.img
-
-# We may have to wait a short time for the pid file to appear.
-for i in `seq 1 10`; do
-    if test -f cache.pid; then
-        break
-    fi
-    sleep 1
-done
-if ! test -f cache.pid; then
-    echo "$0: PID file was not created"
-    exit 1
-fi
-
-pid="$(cat cache.pid)"
-
-# Kill the nbdkit process on exit.
-cleanup ()
-{
-    status=$?
-    trap '' INT QUIT TERM EXIT ERR
-    echo $0: cleanup: exit code $status
-
-    kill $pid
-    rm -f $files
-
-    exit $status
-}
-trap cleanup INT QUIT TERM EXIT ERR
+start_nbdkit -P cache.pid -U cache.sock --filter=cache file cache.img
 
 # Open the overlay and perform some operations.
 guestfish --format=raw -a "nbd://?socket=$PWD/cache.sock" <<'EOF'
@@ -87,5 +61,3 @@ guestfish --ro -a cache.img -m /dev/sda1 <<'EOF'
   cat /hello
   cat /large | cat >/dev/null
 EOF
-
-# The cleanup() function is called implicitly on exit.

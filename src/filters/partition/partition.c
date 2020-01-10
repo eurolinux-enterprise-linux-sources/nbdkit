@@ -38,9 +38,10 @@
 #include <stdint.h>
 #include <string.h>
 #include <inttypes.h>
-#include <endian.h>
 
 #include <nbdkit-filter.h>
+
+#include "byte-swapping.h"
 
 #define THREAD_MODEL NBDKIT_THREAD_MODEL_PARALLEL
 
@@ -196,27 +197,33 @@ find_gpt_partition (struct nbdkit_next_ops *next_ops, void *nxdata,
   struct gpt_header header;
   struct gpt_partition partition;
   int i;
+  int err;
 
-  if (partnum > 128) {
-  out_of_range:
+  get_gpt_header (header_bytes, &header);
+  if (partnum > header.nr_partitions) {
     nbdkit_error ("GPT partition number out of range");
     return -1;
   }
-  get_gpt_header (header_bytes, &header);
-  if (partnum > header.nr_partitions)
-    goto out_of_range;
 
-  if (header.partition_entry_size != 128) {
-    nbdkit_error ("GPT partition entry is not 128 bytes");
+  if (header.partition_entry_size < 128) {
+    nbdkit_error ("GPT partition entry size is < 128 bytes");
     return -1;
   }
 
-  for (i = 0; i < 128; ++i) {
-    /* We already checked these are within bounds in the
-     * partition_prepare call above.
-     */
+  /* Check the disk is large enough to contain the partition table
+   * array (twice) plus other GPT overheads.  Otherwise it is likely
+   * that the GPT header is bogus.
+   */
+  if (size < INT64_C(3*512) +
+      INT64_C(2) * header.nr_partitions * header.partition_entry_size) {
+    nbdkit_error ("GPT partition table is too large for this disk");
+    return -1;
+  }
+
+  for (i = 0; i < header.nr_partitions; ++i) {
+    /* We already checked these are within bounds above. */
     if (next_ops->pread (nxdata, partition_bytes, sizeof partition_bytes,
-                         2*512 + i*128) == -1)
+                         2*512 + i*header.partition_entry_size, 0, &err) == -1)
       return -1;
     get_gpt_partition (partition_bytes, &partition);
     if (memcmp (partition.partition_type_guid,
@@ -240,6 +247,7 @@ partition_prepare (struct nbdkit_next_ops *next_ops, void *nxdata,
   int64_t size;
   uint8_t lba01[1024];          /* LBA 0 and 1 */
   int r;
+  int err;
 
   size = next_ops->get_size (nxdata);
   if (size == -1)
@@ -251,7 +259,7 @@ partition_prepare (struct nbdkit_next_ops *next_ops, void *nxdata,
 
   nbdkit_debug ("disk size=%" PRIi64, size);
 
-  if (next_ops->pread (nxdata, lba01, sizeof lba01, 0) != 0)
+  if (next_ops->pread (nxdata, lba01, sizeof lba01, 0, 0, &err) == -1)
     return -1;
 
   /* Is it GPT? */
@@ -295,42 +303,46 @@ partition_get_size (struct nbdkit_next_ops *next_ops, void *nxdata,
 /* Read data. */
 static int
 partition_pread (struct nbdkit_next_ops *next_ops, void *nxdata,
-                 void *handle, void *buf, uint32_t count, uint64_t offs)
+                 void *handle, void *buf, uint32_t count, uint64_t offs,
+                 uint32_t flags, int *err)
 {
   struct handle *h = handle;
 
-  return next_ops->pread (nxdata, buf, count, offs + h->offset);
+  return next_ops->pread (nxdata, buf, count, offs + h->offset, flags, err);
 }
 
 /* Write data. */
 static int
 partition_pwrite (struct nbdkit_next_ops *next_ops, void *nxdata,
                   void *handle,
-                  const void *buf, uint32_t count, uint64_t offs)
+                  const void *buf, uint32_t count, uint64_t offs,
+                  uint32_t flags, int *err)
 {
   struct handle *h = handle;
 
-  return next_ops->pwrite (nxdata, buf, count, offs + h->offset);
+  return next_ops->pwrite (nxdata, buf, count, offs + h->offset, flags, err);
 }
 
 /* Trim data. */
 static int
 partition_trim (struct nbdkit_next_ops *next_ops, void *nxdata,
-                void *handle, uint32_t count, uint64_t offs)
+                void *handle, uint32_t count, uint64_t offs, uint32_t flags,
+                int *err)
 {
   struct handle *h = handle;
 
-  return next_ops->trim (nxdata, count, offs + h->offset);
+  return next_ops->trim (nxdata, count, offs + h->offset, flags, err);
 }
 
 /* Zero data. */
 static int
 partition_zero (struct nbdkit_next_ops *next_ops, void *nxdata,
-                void *handle, uint32_t count, uint64_t offs, int may_trim)
+                void *handle, uint32_t count, uint64_t offs, uint32_t flags,
+                int *err)
 {
   struct handle *h = handle;
 
-  return next_ops->zero (nxdata, count, offs + h->offset, may_trim);
+  return next_ops->zero (nxdata, count, offs + h->offset, flags, err);
 }
 
 static struct nbdkit_filter filter = {

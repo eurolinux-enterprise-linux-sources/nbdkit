@@ -1,4 +1,4 @@
-#!/bin/bash -
+#!/usr/bin/env bash
 # nbdkit
 # Copyright (C) 2018 Red Hat Inc.
 # All rights reserved.
@@ -31,46 +31,20 @@
 # OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 # SUCH DAMAGE.
 
+source ./functions.sh
 set -e
 set -x
 
 files="cow-base.img cow-diff.qcow2 cow.sock cow.pid"
 rm -f $files
+cleanup_fn rm -f $files
 
 # Create a base image which is partitioned with an empty filesystem.
 guestfish -N cow-base.img=fs exit
 lastmod="$(stat -c "%y" cow-base.img)"
 
 # Run nbdkit with a COW overlay.
-nbdkit -P cow.pid -U cow.sock --filter=cow file file=cow-base.img
-
-# We may have to wait a short time for the pid file to appear.
-for i in `seq 1 10`; do
-    if test -f cow.pid; then
-        break
-    fi
-    sleep 1
-done
-if ! test -f cow.pid; then
-    echo "$0: PID file was not created"
-    exit 1
-fi
-
-pid="$(cat cow.pid)"
-
-# Kill the nbdkit process on exit.
-cleanup ()
-{
-    status=$?
-    trap '' INT QUIT TERM EXIT ERR
-    echo $0: cleanup: exit code $status
-
-    kill $pid
-    rm -f $files
-
-    exit $status
-}
-trap cleanup INT QUIT TERM EXIT ERR
+start_nbdkit -P cow.pid -U cow.sock --filter=cow file cow-base.img
 
 # Write some data into the overlay.
 guestfish --format=raw -a "nbd://?socket=$PWD/cow.sock" -m /dev/sda1 <<EOF
@@ -97,5 +71,3 @@ if qemu-img --version >/dev/null 2>&1; then
     # This checks the file we created exists.
     guestfish --ro -a cow-diff.qcow2 -m /dev/sda1 cat /hello
 fi
-
-# The cleanup() function is called implicitly on exit.

@@ -1,5 +1,5 @@
 # nbdkit
-# Copyright (C) 2013-2017 Red Hat Inc.
+# Copyright (C) 2013-2018 Red Hat Inc.
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
@@ -30,18 +30,17 @@
 # OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 # SUCH DAMAGE.
 
+include $(top_srcdir)/common-rules.mk
+
 source = tar.pl
 
 EXTRA_DIST = \
 	$(source)
 
-CLEANFILES = *~
-
-plugindir = $(libdir)/nbdkit/plugins
-
 if HAVE_PERL
 
 plugin_SCRIPTS = nbdkit-tar-plugin
+CLEANFILES += nbdkit-tar-plugin
 
 # We have to do the rewriting here to avoid stupid exec_prefix.
 nbdkit-tar-plugin: $(source)
@@ -50,16 +49,16 @@ nbdkit-tar-plugin: $(source)
 	mv $@-t $@
 	chmod 0555 $@
 
-if HAVE_POD2MAN
+if HAVE_POD
 
 man_MANS = nbdkit-tar-plugin.1
 CLEANFILES += $(man_MANS)
 
 nbdkit-tar-plugin.1: $(source)
-	$(POD2MAN) $(POD2MAN_ARGS) --section=1 --name=`basename $@ .1` $< $@.t && \
-	if grep 'POD ERROR' $@.t; then rm $@.t; exit 1; fi && \
-	mv $@.t $@
+	$(PODWRAPPER) --section=1 --name nbdkit-tar-plugin --man $@ \
+	    --html $(top_builddir)/html/$@.html \
+	    $<
 
-endif
+endif HAVE_POD
 
 endif

@@ -6,27 +6,48 @@ General ideas for improvements
 
 * Listen on specific interfaces or protocols (eg. only IPv6).
 
-* syslog? journal?
-
 * Performance - measure and improve it.
-
-* Bash tab completion.
 
 * Exit on last connection (the default behaviour of qemu-nbd unless
   you use -t).
 
 * Limit number of incoming connections (like qemu-nbd -e).
 
+* For parallel plugins, only create threads on demand from parallel
+  client requests, rather than pre-creating all threads at connection
+  time, up to the thread pool size limit.  Of course, once created, a
+  thread is reused as possible until the connection closes.
+
+* Async callbacks.  The current parallel support requires one thread
+  per pending message; a solution with fewer threads would split
+  low-level code between request and response, where the callback has
+  to inform nbdkit when the response is ready:
+  https://www.redhat.com/archives/libguestfs/2018-January/msg00149.html
+
+* More NBD protocol features. Qemu has implemented Structured Replies,
+  which allows for more efficient serving of sparse files.  Also in
+  the upstream pipeline: proposals for block status and online resize.
+
+* Add a callback to let plugins request minimum alignment for the
+  buffer to pread/pwrite; useful for a plugin utilizing O_DIRECT or
+  other situation where pre-aligned buffers are more efficient.
+  Ideally, a blocksize filter would honor strict alignment below and
+  advertise loose alignment above; all other filters (particularly
+  ones like offset) can fail to initialize if they can't guarantee
+  strict alignment and don't want to deal with bounce buffers.
+
+* Add per-connection caching of .can_FOO callbacks (we already have
+  some: .can_write is only called once, but .can_fua is called on
+  every request with the FUA flag set).
+
+* Test that zero-length read/write requests behave correctly
+  (NBD protocol says they are unspecified).
+
+* Test and document how to run nbdkit from inetd and xinetd in
+  nbdkit-service(1).
+
 Suggestions for plugins
 -----------------------
-
-* XVA files
-  https://lists.gnu.org/archive/html/qemu-devel/2017-11/msg02971.html
-  is a partial solution but it needs cleaning up.
-
-* glance
-
-* cinder
 
 Note: qemu supports other formats such as libssh, libnfs, iscsi,
 gluster and ceph/rbd, and while similar plugins could be written for
@@ -34,13 +55,57 @@ nbdkit there is no compelling reason unless the result is better than
 qemu-nbd.  For the majority of users it would be better if they were
 directed to qemu-nbd for these use cases.
 
+* XVA files
+
+  https://lists.gnu.org/archive/html/qemu-devel/2017-11/msg02971.html
+  is a partial solution but it needs cleaning up.
+
+* Create ext2 filesystems
+
+  Similar to nbdkit-floppy-plugin which creates FAT32 filesystems, we
+  could also create ext2 filesystems.  This is relatively
+  straightforward using libext2fs (part of e2fsprogs).  In fact we
+  already use this library for the unrelated nbdkit-ext2-plugin.
+
+nbdkit-nbd-plugin could use enhancements:
+
+* FUA passthrough, rather than extra FLUSH calls.  For this, .can_fua
+  must be exposed to plugins (not just filters), and needs to be
+  tri-state rather than just bool.
+
+* Enable client-side TLS (right now, the nbd plugin allows us to
+  support an encrypted client connecting to a plain server; but we
+  would need TLS to support a plain client connecting to an encrypted
+  server).
+
+* Support for connecting to a server over IP rather than just Unix
+  sockets.
+
+nbdkit-floppy-plugin needs boot sector support.  In theory this is
+easy (eg. using SYSLINUX), but the practical reality of making a fully
+bootable floppy is rather more complex.
+
 Suggestions for filters
 -----------------------
 
-* injecting artificial errors for testing clients
+* tar plugin should really be a filter
 
-* nbdkit-cache-filter needs limits on the maximum size of the cache;
-  it could also do with a sensible replacement policy, etc.
+* xz plugin should really be a filter
+
+* gzip plugin should really be a filter
+
+* masking plugin features for testing clients (see 'nozero' and 'fua'
+  filters for examples)
+
+nbdkit-cache-filter needs considerable work:
+
+* allow the user to limit the total size of the cache
+
+* handle ENOSPC errors
+
+* implement some cache replacement policies
+
+* some sort of background task or thread to write out dirty blocks
 
 Composing nbdkit
 ----------------

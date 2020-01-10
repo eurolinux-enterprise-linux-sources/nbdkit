@@ -1,5 +1,5 @@
 /* nbdkit
- * Copyright (C) 2013-2016 Red Hat Inc.
+ * Copyright (C) 2013-2018 Red Hat Inc.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -52,7 +52,7 @@ main (int argc, char *argv[])
   char *data;
   size_t i, size;
 
-  if (test_start_nbdkit ("-o", "file", "file=file-data", NULL) == -1)
+  if (test_start_nbdkit ("-o", "file", "file-data", NULL) == -1)
     exit (EXIT_FAILURE);
 
   g = guestfs_create ();

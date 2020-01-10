@@ -48,6 +48,10 @@
 
 #include <nbdkit-plugin.h>
 
+#ifndef HAVE_FDATASYNC
+#define fdatasync fsync
+#endif
+
 /* The size of disk in bytes (initialized by size=<SIZE> parameter).
  * If size parameter is not specified, it defaults to 100M.
  */
@@ -103,7 +107,7 @@ static void *
 example3_open (int readonly)
 {
   struct example3_handle *h;
-  char template[] = "/var/tmp/diskXXXXXX";
+  char template[] = LARGE_TMPDIR "/diskXXXXXX";
 
   h = malloc (sizeof *h);
   if (h == NULL) {

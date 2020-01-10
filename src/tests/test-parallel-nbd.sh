@@ -1,4 +1,4 @@
-#!/bin/bash -
+#!/usr/bin/env bash
 # nbdkit
 # Copyright (C) 2017-2018 Red Hat Inc.
 # All rights reserved.
@@ -31,22 +31,31 @@
 # OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 # SUCH DAMAGE.
 
-# Makefile sets $QEMU_IO, but it's also nice if the # script runs again
-# standalone afterwards for diagnosing any failures
-: ${QEMU_IO=qemu-io}
+source ./functions.sh
+
+# Check file-data was created by Makefile and qemu-io exists.
+if ! test -f file-data; then
+    echo "$0: missing file-data"
+    exit 77
+fi
+if ! qemu-io --version; then
+    echo "$0: missing qemu-io"
+    exit 77
+fi
 
 # We require --exit-with-parent to work
 ( nbdkit --exit-with-parent --help ) >/dev/null 2>&1 ||
   { echo "Missing --exit-with-parent support"; exit 77; }
 
-files='test-parallel-nbd.out test-parallel-nbd.sock test-parallel-nbd.data'
-trap 'rm -f $files' 0 1 2 3 15
+files="test-parallel-nbd.out test-parallel-nbd.sock test-parallel-nbd.data test-parallel-nbd.pid"
+rm -f $files
+cleanup_fn rm -f $files
 
 # Populate file, and sanity check that qemu-io can issue parallel requests
 printf '%1024s' . > test-parallel-nbd.data
-$QEMU_IO -f raw -c "aio_write -P 1 0 512" -c "aio_write -P 2 512 512" \
+qemu-io -f raw -c "aio_write -P 1 0 512" -c "aio_write -P 2 512 512" \
          -c aio_flush test-parallel-nbd.data ||
-    { echo "'$QEMU_IO' can't drive parallel requests"; exit 77; }
+    { echo "'qemu-io' can't drive parallel requests"; exit 77; }
 
 # Set up the file plugin to delay both reads and writes (for a good chance
 # that parallel requests are in flight), and with writes longer than reads
@@ -54,15 +63,14 @@ $QEMU_IO -f raw -c "aio_write -P 1 0 512" -c "aio_write -P 2 512 512" \
 # may have spurious failures under heavy loads on the test machine, where
 # tuning the delays may help.
 
-(
-rm -f test-parallel-nbd.sock
-nbdkit --exit-with-parent -v -U test-parallel-nbd.sock \
-  --filter=delay \
-  file file=test-parallel-nbd.data wdelay=2 rdelay=1 &
+start_nbdkit -P test-parallel-nbd.pid \
+             -U test-parallel-nbd.sock \
+             --filter=delay \
+             file test-parallel-nbd.data wdelay=2 rdelay=1
 
 # With --threads=1, the write should complete first because it was issued first
 nbdkit -v -t 1 -U - nbd socket=test-parallel-nbd.sock --run '
-  $QEMU_IO -f raw -c "aio_write -P 2 512 512" -c "aio_read -P 1 0 512" \
+  qemu-io -f raw -c "aio_write -P 2 512 512" -c "aio_read -P 1 0 512" \
   -c aio_flush $nbd' | tee test-parallel-nbd.out
 if test "$(grep '512/512' test-parallel-nbd.out)" != \
 "wrote 512/512 bytes at offset 512
@@ -72,14 +80,10 @@ fi
 
 # With default --threads, the faster read should complete first
 nbdkit -v -U - nbd socket=test-parallel-nbd.sock --run '
-  $QEMU_IO -f raw -c "aio_write -P 2 512 512" -c "aio_read -P 1 0 512" \
+  qemu-io -f raw -c "aio_write -P 2 512 512" -c "aio_read -P 1 0 512" \
   -c aio_flush $nbd' | tee test-parallel-nbd.out
 if test "$(grep '512/512' test-parallel-nbd.out)" != \
 "read 512/512 bytes at offset 0
 wrote 512/512 bytes at offset 512"; then
   exit 1
 fi
-
-) || exit $?
-
-exit 0

@@ -30,51 +30,87 @@
 # OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 # SUCH DAMAGE.
 
-CLEANFILES = *~ *.cmi *.cmx *.cmxa *.so
+include $(top_srcdir)/common-rules.mk
+
 MAINTAINERCLEANFILES =
 
 EXTRA_DIST = \
-	functions.sh \
 	make-pki.sh \
+	make-psk.sh \
 	python-exception.py \
 	README.tests \
 	shebang.pl \
 	shebang.py \
 	shebang.rb \
+	test-blocksize.sh \
 	test-cache.sh \
 	test-captive.sh \
 	test-cow.sh \
 	test-cxx.sh \
+	test-data-7E.sh \
+	test-data-base64.sh \
+	test-data-file.sh \
+	test-data-raw.sh \
+	test-debug-flags.sh \
 	test-dump-config.sh \
 	test-dump-plugin.sh \
 	test-dump-plugin-example4.sh \
+	test-floppy.sh \
 	test-foreground.sh \
+	test-fua.sh \
 	test-help.sh \
 	test-help-plugin.sh \
-	test-ipv4.sh \
+	test-ip.sh \
+	test-iso.sh \
+	test-layers.sh \
+	test-log.sh \
+	test.lua \
+	test-memory-largest.sh \
+	test-memory-largest-for-qemu.sh \
+	test-nozero.sh \
 	test_ocaml_plugin.ml \
 	test-ocaml.c \
+	test-offset2.sh \
 	test-parallel-file.sh \
 	test-parallel-nbd.sh \
+	test-partitioning1.sh \
+	test-partitioning2.sh \
+	test-partitioning3.sh \
+	test-partitioning4.sh \
+	test-pattern.sh \
+	test-pattern-largest.sh \
+	test-pattern-largest-for-qemu.sh \
 	test-python-exception.sh \
 	test.pl \
 	test.py \
 	test.rb \
+	test.tcl \
 	test-shebang-perl.sh \
 	test-shebang-python.sh \
 	test-shebang-ruby.sh \
+	test-shell.sh \
 	test-single.sh \
 	test-start.sh \
 	test-random-sock.sh \
 	test-tls.sh \
+	test-tls-psk.sh \
+	test-truncate1.sh \
+	test-truncate2.sh \
+	test-truncate3.sh \
+	test-vddk.sh \
 	test-version.sh \
 	test-version-filter.sh \
-	test-version-plugin.sh
+	test-version-plugin.sh \
+	test-zero.sh
 
 # Use 'make check' to run the ordinary tests.  To run all the tests
 # under valgrind, use the following rule:
 check-valgrind:
 	NBDKIT_VALGRIND=1 $(MAKE) check
+
+# To run only tests which require root, use:
+check-root:
+	$(MAKE) check TESTS="test-file-block"
 
 #----------------------------------------------------------------------
 # Basic server command line and start-up tests.
@@ -106,9 +142,11 @@ TESTS += \
 	test-captive.sh \
 	test-random-sock.sh \
 	test-tls.sh \
-	test-ipv4.sh \
+	test-tls-psk.sh \
+	test-ip.sh \
 	test-socket-activation \
-	test-foreground.sh
+	test-foreground.sh \
+	test-debug-flags.sh
 
 check_PROGRAMS += \
 	test-socket-activation
@@ -157,13 +195,28 @@ endif HAVE_CXX
 check_PROGRAMS += test-exit-with-parent
 TESTS += test-exit-with-parent
 
-test_exit_with_parent_SOURCES = test-exit-with-parent.c test.h
-test_exit_with_parent_CFLAGS = $(WARNINGS_CFLAGS) $(LIBGUESTFS_CFLAGS)
+test_exit_with_parent_SOURCES = \
+	test-exit-with-parent.c test.h
+test_exit_with_parent_CPPFLAGS = \
+	-I$(top_srcdir)/common/include
+test_exit_with_parent_CFLAGS = \
+	$(WARNINGS_CFLAGS) $(LIBGUESTFS_CFLAGS)
 
 # PKI files for the TLS tests.
 check_DATA += pki/.stamp
 pki/.stamp: $(srcdir)/make-pki.sh
 	$(srcdir)/make-pki.sh
+
+# PSK keys for the TLS-PSK tests.
+check_DATA += keys.psk
+keys.psk: $(srcdir)/make-psk.sh
+	$(srcdir)/make-psk.sh
+
+# Keys are expensive to recreate so only delete them when we do
+# ‘make maintainer-clean’.
+MAINTAINERCLEANFILES += keys.psk
+maintainer-clean-local:
+	rm -rf pki
 
 #----------------------------------------------------------------------
 # Tests of C plugins or tests which require plugins.
@@ -180,11 +233,9 @@ file-data:
 
 # While most tests need libguestfs, testing parallel I/O is easier when
 # using qemu-io to kick off asynchronous requests.
-if HAVE_QEMU_IO
-TESTS_ENVIRONMENT += QEMU_IO=$(QEMU_IO)
-TESTS += test-parallel-file.sh
-TESTS += test-parallel-nbd.sh
-endif HAVE_QEMU_IO
+TESTS += \
+	test-parallel-file.sh \
+	test-parallel-nbd.sh
 
 # Most in-depth tests need libguestfs, since that is a convenient way to
 # drive qemu.
@@ -200,7 +251,8 @@ TESTS_ENVIRONMENT += \
 	LIBGUESTFS_ATTACH_METHOD=appliance \
 	LIBGUESTFS_DEBUG=1 \
 	LIBGUESTFS_TRACE=1 \
-	LD_LIBRARY_PATH=../plugins/ocaml/.libs:$(LD_LIBRARY_PATH)
+	LD_LIBRARY_PATH=../plugins/ocaml/.libs:$(LD_LIBRARY_PATH) \
+	LIBRARY_PATH=../plugins/ocaml/.libs:$(LIBRARY_PATH)
 
 # Common test library.
 check_LTLIBRARIES += libtest.la
@@ -237,17 +289,65 @@ MAINTAINERCLEANFILES += disk
 
 disk:
 	rm -f $@ test1.img
-	guestfish -N fs -m /dev/sda1 write /hello.txt "hello,world"
+	guestfish -N fs:ext4:100M -m /dev/sda1 write /hello.txt "hello,world"
 	mv test1.img disk
 
 endif HAVE_GUESTFISH
 
+# data plugin test.
+LIBGUESTFS_TESTS += test-data
+TESTS += \
+	test-data-7E.sh \
+	test-data-base64.sh \
+	test-data-file.sh \
+	test-data-raw.sh
+
+test_data_SOURCES = test-data.c test.h
+test_data_CPPFLAGS = -I$(top_srcdir)/common/include
+test_data_CFLAGS = $(WARNINGS_CFLAGS) $(LIBGUESTFS_CFLAGS)
+test_data_LDADD = libtest.la $(LIBGUESTFS_LIBS)
+
+# ext2 plugin test.
+if HAVE_EXT2
+if HAVE_GUESTFISH
+
+LIBGUESTFS_TESTS += test-ext2
+check_DATA += ext2.img
+MAINTAINERCLEANFILES += ext2.img
+
+ext2.img: disk
+	rm -f $@ $@-t
+	guestfish \
+	    sparse $@-t 2G : \
+	    run : \
+	    mkfs ext4 /dev/sda : \
+	    mount /dev/sda / : \
+	    mkdir /disks : \
+	    upload $< /disks/disk.img
+	mv $@-t $@
+
+test_ext2_SOURCES = test-ext2.c test.h
+test_ext2_CFLAGS = $(WARNINGS_CFLAGS) $(LIBGUESTFS_CFLAGS)
+test_ext2_LDADD = libtest.la $(LIBGUESTFS_LIBS)
+
+endif HAVE_GUESTFISH
+endif HAVE_EXT2
+
 # file plugin test.
-LIBGUESTFS_TESTS += test-file
+LIBGUESTFS_TESTS += test-file test-file-block
 
 test_file_SOURCES = test-file.c test.h
 test_file_CFLAGS = $(WARNINGS_CFLAGS) $(LIBGUESTFS_CFLAGS)
 test_file_LDADD = libtest.la $(LIBGUESTFS_LIBS)
+
+test_file_block_SOURCES = test-file-block.c test.h
+test_file_block_CFLAGS = $(WARNINGS_CFLAGS) $(LIBGUESTFS_CFLAGS)
+test_file_block_LDADD = libtest.la $(LIBGUESTFS_LIBS)
+
+# floppy plugin test.
+if HAVE_GUESTFISH
+TESTS += test-floppy.sh
+endif HAVE_GUESTFISH
 
 # gzip plugin test.
 if HAVE_ZLIB
@@ -268,12 +368,38 @@ disk.gz: disk
 endif HAVE_GUESTFISH
 endif HAVE_ZLIB
 
+# iso plugin test.
+if HAVE_ISO
+if HAVE_GUESTFISH
+
+TESTS += test-iso.sh
+
+endif HAVE_GUESTFISH
+endif HAVE_ISO
+
 # memory plugin test.
 LIBGUESTFS_TESTS += test-memory
+TESTS += test-memory-largest.sh test-memory-largest-for-qemu.sh
 
 test_memory_SOURCES = test-memory.c test.h
 test_memory_CFLAGS = $(WARNINGS_CFLAGS) $(LIBGUESTFS_CFLAGS)
 test_memory_LDADD = libtest.la $(LIBGUESTFS_LIBS)
+
+# partitioning plugin test.
+TESTS += \
+	test-partitioning1.sh \
+	test-partitioning4.sh
+if HAVE_GUESTFISH
+TESTS += \
+	test-partitioning2.sh \
+	test-partitioning3.sh
+endif HAVE_GUESTFISH
+
+# pattern plugin test.
+TESTS += \
+	test-pattern.sh \
+	test-pattern-largest.sh \
+	test-pattern-largest-for-qemu.sh
 
 # nbd plugin test.
 LIBGUESTFS_TESTS += test-nbd
@@ -288,6 +414,13 @@ LIBGUESTFS_TESTS += test-null
 test_null_SOURCES = test-null.c test.h
 test_null_CFLAGS = $(WARNINGS_CFLAGS) $(LIBGUESTFS_CFLAGS)
 test_null_LDADD = libtest.la $(LIBGUESTFS_LIBS)
+
+# random plugin test.
+LIBGUESTFS_TESTS += test-random
+
+test_random_SOURCES = test-random.c test.h
+test_random_CFLAGS = $(WARNINGS_CFLAGS) $(LIBGUESTFS_CFLAGS)
+test_random_LDADD = libtest.la $(LIBGUESTFS_LIBS)
 
 # split files plugin test.
 check_DATA += split1 split2 split3
@@ -319,6 +452,26 @@ test_streaming_SOURCES = test-streaming.c test.h
 test_streaming_CFLAGS = $(WARNINGS_CFLAGS) $(LIBGUESTFS_CFLAGS)
 test_streaming_LDADD = libtest.la $(LIBGUESTFS_LIBS)
 
+# VDDK plugin test.
+# This only tests that the plugin can be loaded against a
+# dummy VDDK library, it is not a detailed test.
+
+# check_LTLIBRARIES won't build a shared library (see automake manual).
+# So we have to do this and add a dependency.
+noinst_LTLIBRARIES += libvixDiskLib.la
+TESTS += test-vddk.sh
+
+libvixDiskLib_la_SOURCES = \
+	dummy-vddk.c
+libvixDiskLib_la_CPPFLAGS = \
+	-I$(top_srcdir)/plugins/vddk
+libvixDiskLib_la_CXXFLAGS = \
+        $(WARNINGS_CFLAGS)
+# For use of the -rpath option, see:
+# https://lists.gnu.org/archive/html/libtool/2007-07/msg00067.html
+libvixDiskLib_la_LDFLAGS = \
+	-shared -version-number 6:0:0 -rpath /nowhere
+
 # xz plugin test.
 if HAVE_LIBLZMA
 if HAVE_GUESTFISH
@@ -337,6 +490,9 @@ disk.xz: disk
 
 endif HAVE_GUESTFISH
 endif HAVE_LIBLZMA
+
+# zero plugin test.
+TESTS += test-zero.sh
 
 #----------------------------------------------------------------------
 # Tests of language plugins.
@@ -413,8 +569,120 @@ test_ruby_LDADD = libtest.la $(LIBGUESTFS_LIBS)
 
 endif HAVE_RUBY
 
+# Shell (sh) plugin test.
+LIBGUESTFS_TESTS += test-shell
+check_DATA += test-shell.img
+MAINTAINERCLEANFILES += test-shell.img
+
+test_shell_SOURCES = test-lang-plugins.c test.h
+test_shell_CFLAGS = \
+	-DLANG='"sh"' -DSCRIPT='"./test-shell.sh"' \
+	$(WARNINGS_CFLAGS) $(LIBGUESTFS_CFLAGS)
+test_shell_LDADD = libtest.la $(LIBGUESTFS_LIBS)
+
+test-shell.img:
+	truncate -s 1048576 $@
+
+# Tcl plugin test.
+if HAVE_TCL
+
+LIBGUESTFS_TESTS += test-tcl
+
+test_tcl_SOURCES = test-lang-plugins.c test.h
+test_tcl_CFLAGS = \
+	-DLANG='"tcl"' -DSCRIPT='"test.tcl"' \
+	$(WARNINGS_CFLAGS) $(LIBGUESTFS_CFLAGS)
+test_tcl_LDADD = libtest.la $(LIBGUESTFS_LIBS)
+
+endif HAVE_TCL
+
+# Lua plugin test.
+if HAVE_LUA
+
+LIBGUESTFS_TESTS += test-lua
+
+test_lua_SOURCES = test-lang-plugins.c test.h
+test_lua_CFLAGS = \
+	-DLANG='"lua"' -DSCRIPT='"test.lua"' \
+	$(WARNINGS_CFLAGS) $(LIBGUESTFS_CFLAGS)
+test_lua_LDADD = libtest.la $(LIBGUESTFS_LIBS)
+
+endif HAVE_LUA
+
 #----------------------------------------------------------------------
 # Tests of filters.
+
+# Generic test of filter layers.
+check_PROGRAMS += test-layers
+TESTS += test-layers.sh test-layers
+
+test_layers_SOURCES = \
+	test-layers.c \
+	$(top_srcdir)/src/protocol.h
+test_layers_CPPFLAGS = \
+	-I$(top_srcdir)/common/include \
+	-I$(top_srcdir)/src
+test_layers_CFLAGS = \
+	$(WARNINGS_CFLAGS) \
+	$(PTHREAD_CFLAGS)
+test_layers_LDFLAGS = \
+	$(PTHREAD_LIBS)
+test_layers_DEPENDENCIES = \
+	test-layers-plugin.la \
+	test-layers-filter1.la \
+	test-layers-filter2.la \
+	test-layers-filter3.la
+
+# check_LTLIBRARIES won't build a shared library (see automake manual).
+# So we have to do this and add a dependency.
+noinst_LTLIBRARIES += \
+	test-layers-plugin.la \
+	test-layers-filter1.la \
+	test-layers-filter2.la \
+	test-layers-filter3.la
+
+test_layers_plugin_la_SOURCES = \
+	test-layers-plugin.c \
+	$(top_srcdir)/include/nbdkit-plugin.h
+test_layers_plugin_la_CPPFLAGS = -I$(top_srcdir)/include
+test_layers_plugin_la_CFLAGS = $(WARNINGS_CFLAGS)
+# For use of the -rpath option, see:
+# https://lists.gnu.org/archive/html/libtool/2007-07/msg00067.html
+test_layers_plugin_la_LDFLAGS = \
+	-module -avoid-version -shared -rpath /nowhere
+
+test_layers_filter1_la_SOURCES = \
+	test-layers-filter.c \
+	$(top_srcdir)/include/nbdkit-filter.h
+test_layers_filter1_la_CPPFLAGS = -I$(top_srcdir)/include
+test_layers_filter1_la_CFLAGS = $(WARNINGS_CFLAGS) -Dlayer='"filter1"'
+# For use of the -rpath option, see:
+# https://lists.gnu.org/archive/html/libtool/2007-07/msg00067.html
+test_layers_filter1_la_LDFLAGS = \
+	-module -avoid-version -shared -rpath /nowhere
+
+test_layers_filter2_la_SOURCES = \
+	test-layers-filter.c \
+	$(top_srcdir)/include/nbdkit-filter.h
+test_layers_filter2_la_CPPFLAGS = -I$(top_srcdir)/include
+test_layers_filter2_la_CFLAGS = $(WARNINGS_CFLAGS) -Dlayer='"filter2"'
+# For use of the -rpath option, see:
+# https://lists.gnu.org/archive/html/libtool/2007-07/msg00067.html
+test_layers_filter2_la_LDFLAGS = \
+	-module -avoid-version -shared -rpath /nowhere
+
+test_layers_filter3_la_SOURCES = \
+	test-layers-filter.c \
+	$(top_srcdir)/include/nbdkit-filter.h
+test_layers_filter3_la_CPPFLAGS = -I$(top_srcdir)/include
+test_layers_filter3_la_CFLAGS = $(WARNINGS_CFLAGS) -Dlayer='"filter3"'
+# For use of the -rpath option, see:
+# https://lists.gnu.org/archive/html/libtool/2007-07/msg00067.html
+test_layers_filter3_la_LDFLAGS = \
+	-module -avoid-version -shared -rpath /nowhere
+
+# blocksize filter test.
+TESTS += test-blocksize.sh
 
 # cache filter test.
 if HAVE_GUESTFISH
@@ -433,6 +701,22 @@ test_delay_SOURCES = test-delay.c test.h
 test_delay_CFLAGS = $(WARNINGS_CFLAGS) $(LIBGUESTFS_CFLAGS)
 test_delay_LDADD = libtest.la $(LIBGUESTFS_LIBS)
 
+# error filter test.
+LIBGUESTFS_TESTS += test-error
+
+test_error_SOURCES = test-error.c test.h
+test_error_CFLAGS = $(WARNINGS_CFLAGS) $(LIBGUESTFS_CFLAGS)
+test_error_LDADD = libtest.la $(LIBGUESTFS_LIBS)
+
+# fua filter test.
+TESTS += test-fua.sh
+
+# log filter test.
+TESTS += test-log.sh
+
+# nozero filter test.
+TESTS += test-nozero.sh
+
 # offset filter test.
 check_DATA += offset-data
 MAINTAINERCLEANFILES += offset-data
@@ -447,11 +731,19 @@ test_offset_SOURCES = test-offset.c test.h
 test_offset_CFLAGS = $(WARNINGS_CFLAGS) $(LIBGUESTFS_CFLAGS)
 test_offset_LDADD = libtest.la $(LIBGUESTFS_LIBS)
 
+TESTS += test-offset2.sh
+
 # partition filter test.
 LIBGUESTFS_TESTS += test-partition
 
 test_partition_SOURCES = test-partition.c test.h
 test_partition_CFLAGS = $(WARNINGS_CFLAGS) $(LIBGUESTFS_CFLAGS)
 test_partition_LDADD = libtest.la $(LIBGUESTFS_LIBS)
+
+# truncate filter tests.
+TESTS += \
+	test-truncate1.sh \
+	test-truncate2.sh \
+	test-truncate3.sh
 
 endif HAVE_PLUGINS

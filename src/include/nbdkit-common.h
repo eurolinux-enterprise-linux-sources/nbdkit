@@ -50,6 +50,13 @@ extern "C" {
 #define NBDKIT_THREAD_MODEL_SERIALIZE_REQUESTS        2
 #define NBDKIT_THREAD_MODEL_PARALLEL                  3
 
+#define NBDKIT_FLAG_MAY_TRIM (1<<0) /* Maps to !NBD_CMD_FLAG_NO_HOLE */
+#define NBDKIT_FLAG_FUA      (1<<1) /* Maps to NBD_CMD_FLAG_FUA */
+
+#define NBDKIT_FUA_NONE       0
+#define NBDKIT_FUA_EMULATE    1
+#define NBDKIT_FUA_NATIVE     2
+
 extern void nbdkit_error (const char *msg, ...)
   __attribute__((__format__ (__printf__, 1, 2)));
 extern void nbdkit_verror (const char *msg, va_list args);
@@ -59,7 +66,9 @@ extern void nbdkit_vdebug (const char *msg, va_list args);
 
 extern char *nbdkit_absolute_path (const char *path);
 extern int64_t nbdkit_parse_size (const char *str);
+extern int nbdkit_parse_bool (const char *str);
 extern int nbdkit_read_password (const char *value, char **password);
+extern char *nbdkit_realpath (const char *path);
 
 #ifdef __cplusplus
 }
