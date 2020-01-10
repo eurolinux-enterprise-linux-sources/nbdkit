@@ -1,0 +1,82 @@
+From cb13bf0b5218a75b8f91722126008b78ada89955 Mon Sep 17 00:00:00 2001
+From: "Richard W.M. Jones" <rjones@redhat.com>
+Date: Wed, 25 Jul 2018 09:28:32 +0100
+Subject: [PATCH 6/8] vddk: If relative libdir parameter is passed, make it
+ absolute.
+
+(cherry picked from commit 8838497c44d51f2c3ea12adad89fd836116af201)
+
+RHEL 7.6: Replace the nbdkit_realpath function with
+nbdkit_absolute_path, since nbdkit-1.2 does not have the former.
+---
+ plugins/vddk/nbdkit-vddk-plugin.pod |  3 +--
+ plugins/vddk/vddk.c                 | 14 ++++++++++----
+ 2 files changed, 11 insertions(+), 6 deletions(-)
+
+diff --git a/plugins/vddk/nbdkit-vddk-plugin.pod b/plugins/vddk/nbdkit-vddk-plugin.pod
+index ba7806d..57a039f 100644
+--- a/plugins/vddk/nbdkit-vddk-plugin.pod
++++ b/plugins/vddk/nbdkit-vddk-plugin.pod
+@@ -87,8 +87,7 @@ L</NOTES> below).
+ 
+ =item B<libdir=PATHNAME>
+ 
+-Optional.  This sets the path of the VMware VDDK distribution.  It
+-must be an absolute path.
++Optional.  This sets the path of the VMware VDDK distribution.
+ 
+ VDDK uses this to load its own plugins, if this path is unspecified or
+ wrong then VDDK will work with reduced functionality.
+diff --git a/plugins/vddk/vddk.c b/plugins/vddk/vddk.c
+index 79bcf7f..5d7bf6d 100644
+--- a/plugins/vddk/vddk.c
++++ b/plugins/vddk/vddk.c
+@@ -72,7 +72,7 @@ static int init_called = 0;                /* was InitEx called */
+ static char *config = NULL;                /* config */
+ static const char *cookie = NULL;          /* cookie */
+ static const char *filename = NULL;        /* file */
+-static const char *libdir = VDDK_LIBDIR;   /* libdir */
++static char *libdir = NULL;                /* libdir */
+ static int nfc_host_port = 0;              /* nfchostport */
+ static char *password = NULL;              /* password */
+ static int port = 0;                       /* port */
+@@ -180,6 +180,7 @@ vddk_unload (void)
+   if (dl)
+     dlclose (dl);
+   free (config);
++  free (libdir);
+   free (password);
+ }
+ 
+@@ -205,7 +206,11 @@ vddk_config (const char *key, const char *value)
+     filename = value;
+   }
+   else if (strcmp (key, "libdir") == 0) {
+-    libdir = value;
++    /* See FILENAMES AND PATHS in nbdkit-plugin(3). */
++    free (libdir);
++    libdir = nbdkit_absolute_path (value);
++    if (!libdir)
++      return -1;
+   }
+   else if (strcmp (key, "nfchostport") == 0) {
+     if (sscanf (value, "%d", &nfc_host_port) != 1) {
+@@ -296,12 +301,13 @@ vddk_config_complete (void)
+   /* Initialize VDDK library. */
+   DEBUG_CALL ("VixDiskLib_InitEx",
+               "%d, %d, &debug_fn, &error_fn, &error_fn, %s, %s",
+-              VDDK_MAJOR, VDDK_MINOR, libdir, config ? : "NULL");
++              VDDK_MAJOR, VDDK_MINOR,
++              libdir ? : VDDK_LIBDIR, config ? : "NULL");
+   err = VixDiskLib_InitEx (VDDK_MAJOR, VDDK_MINOR,
+                            &debug_function, /* log function */
+                            &error_function, /* warn function */
+                            &error_function, /* panic function */
+-                           libdir, config);
++                           libdir ? : VDDK_LIBDIR, config);
+   if (err != VIX_OK) {
+     VDDK_ERROR (err, "VixDiskLib_InitEx");
+     exit (EXIT_FAILURE);
+-- 
+2.18.0
+

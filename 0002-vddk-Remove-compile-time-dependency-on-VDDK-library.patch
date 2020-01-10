@@ -1,0 +1,600 @@
+From cc20761db7c5a1f9183c3a94528a2ed241c7cf00 Mon Sep 17 00:00:00 2001
+From: "Richard W.M. Jones" <rjones@redhat.com>
+Date: Tue, 24 Jul 2018 12:11:17 +0100
+Subject: [PATCH 2/8] vddk: Remove compile-time dependency on VDDK library.
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Allow the plugin to be compiled without needing the library.  Instead
+of linking to the library at compile time we open the library at
+runtime using dlopen.
+
+The plugin is now compiled unconditionally, unless you use
+‘./configure --disable-vddk’.  (Of course you still need the VDDK
+library if you want to use the plugin.  We cannot even test the plugin
+loads without the library.).
+
+This change also moves the initialization of VDDK (calling InitEx)
+into the config_complete method instead of the load method.  This
+later initialization allows the "config=FILENAME" and
+"libdir=PATHNAME" parameters to have an effect whereas previously they
+were silently ignored.
+
+(cherry picked from commit 8d7f7c26eb435334d7fa35e84ceee7d266dfae4c)
+---
+ README                              |   4 -
+ configure.ac                        |  75 ++---------------
+ plugins/vddk/Makefile.am            |  13 +--
+ plugins/vddk/README.VDDK            |  25 ++----
+ plugins/vddk/nbdkit-vddk-plugin.pod |  48 ++++++++---
+ plugins/vddk/vddk-structs.h         | 125 ++++++++++++++++++++++++++++
+ plugins/vddk/vddk.c                 |  89 ++++++++++++++------
+ 7 files changed, 244 insertions(+), 135 deletions(-)
+ create mode 100644 plugins/vddk/vddk-structs.h
+
+diff --git a/README b/README
+index baa29fc..8867cab 100644
+--- a/README
++++ b/README
+@@ -65,10 +65,6 @@ For the libguestfs plugin, and to run the test suite:
+ 
+  - guestfish (from libguestfs)
+ 
+-For the VDDK plugin:
+-
+- - VDDK (see plugins/vddk/README.VDDK)
+-
+ For the Perl, example4 and tar plugins:
+ 
+  - perl development libraries
+diff --git a/configure.ac b/configure.ac
+index d207050..b3278eb 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -430,77 +430,14 @@ dnl Check for qemu-io (only needed for some of the tests).
+ AC_CHECK_PROG([QEMU_IO], [qemu-io], [qemu-io], [no])
+ AM_CONDITIONAL([HAVE_QEMU_IO], [test "x$QEMU_IO" != "xno"])
+ 
++dnl Check if the user wants to disable VDDK support.
+ dnl See plugins/vddk/README.VDDK.
+-AC_CHECK_SIZEOF([size_t])
+-AS_IF([test "x$ac_cv_sizeof_size_t" = "x4"],[bits=32],[bits=64])
+-AC_ARG_WITH([vddk],[
+-    AS_HELP_STRING([--with-vddk],
+-                   [enable VMware VDDK plugin @<:@default=no@:>@])],
++AC_ARG_ENABLE([vddk],[
++    AS_HELP_STRING([--disable-vddk],
++                   [disable VMware VDDK plugin])],
+     [],
+-    [with_vddk=no])
+-AS_IF([test "$with_vddk" = "yes"],[
+-    VDDK_CFLAGS=
+-    VDDK_LIBS="-lvixDiskLib"
+-    # XXX Warning: stupid VMware API.
+-    VDDK_LIBDIR="$libdir/vmware-vix-disklib"
+-    AC_MSG_NOTICE([VDDK plugin enabled from $VDDK_LIBDIR])
+-    ],[
+-    AS_IF([test "$with_vddk" != "no"], [
+-        VDDK_CFLAGS="-I$with_vddk/include"
+-        VDDK_LIBS="-L$with_vddk/lib$bits -lvixDiskLib"
+-        VDDK_LIBDIR="$with_vddk"
+-        AC_MSG_NOTICE([VDDK plugin enabled from $with_vddk])
+-        ],
+-        [AC_MSG_NOTICE([VDDK plugin disabled])
+-    ])
+-])
+-
+-dnl If the VDDK plugin was enabled, compile and link a test program to make
+-dnl sure the library really works.
+-AS_IF([test "x$VDDK_LIBS" != "x"],[
+-    # Save CFLAGS etc while we do this test.
+-    acx_nbdkit_save_CFLAGS="${CFLAGS}"
+-    acx_nbdkit_save_LIBS="${LIBS}"
+-    CFLAGS="$CFLAGS $VDDK_CFLAGS"
+-    LIBS="$VDDK_LIBS $LIBS"
+-
+-    AC_MSG_CHECKING([if we can link to VDDK])
+-    AC_LINK_IFELSE([
+-        AC_LANG_SOURCE([[
+-#include <stdio.h>
+-#include <stdint.h>
+-#include <vixDiskLib.h>
+-
+-int
+-main ()
+-{
+-    VixDiskLib_Exit ();
+-}
+-]])
+-    ],[
+-        AC_MSG_RESULT([yes])
+-    ],[
+-        AC_MSG_RESULT([no])
+-        AC_MSG_ERROR([could not link to VDDK, see ‘config.log’ for more information])
+-    ])
+-
+-    dnl Check for optional fields in VixDiskLibConnectParams struct.
+-    AC_CHECK_MEMBERS([VixDiskLibConnectParams.nfcHostPort, VixDiskLibConnectParams.vimApiVer],
+-                    [], [], [[
+-#include <stdio.h>
+-#include <stdint.h>
+-#include <vixDiskLib.h>
+-]])
+-
+-    dnl Restore CFLAGS, etc.
+-    CFLAGS="${acx_nbdkit_save_CFLAGS}"
+-    LIBS="${acx_nbdkit_save_LIBS}"
+-])
+-
+-AC_SUBST([VDDK_CFLAGS])
+-AC_SUBST([VDDK_LIBS])
+-AC_DEFINE_UNQUOTED([VDDK_LIBDIR],["$VDDK_LIBDIR"],[VDDK 'libDir'.])
+-AM_CONDITIONAL([HAVE_VDDK],[test "x$VDDK_LIBS" != "x"])
++    [enable_vddk=yes])
++AM_CONDITIONAL([HAVE_VDDK], [test "x$enable_vddk" = "xyes"])
+ 
+ dnl Produce output files.
+ AC_CONFIG_HEADERS([config.h])
+diff --git a/plugins/vddk/Makefile.am b/plugins/vddk/Makefile.am
+index b910a64..1f4c91e 100644
+--- a/plugins/vddk/Makefile.am
++++ b/plugins/vddk/Makefile.am
+@@ -1,5 +1,5 @@
+ # nbdkit
+-# Copyright (C) 2013 Red Hat Inc.
++# Copyright (C) 2013-2018 Red Hat Inc.
+ # All rights reserved.
+ #
+ # Redistribution and use in source and binary forms, with or without
+@@ -44,15 +44,16 @@ plugin_LTLIBRARIES = nbdkit-vddk-plugin.la
+ 
+ nbdkit_vddk_plugin_la_SOURCES = \
+ 	vddk.c \
++	vddk-structs.h \
+ 	$(top_srcdir)/include/nbdkit-plugin.h
+ 
+ nbdkit_vddk_plugin_la_CPPFLAGS = \
+-	-I$(top_srcdir)/include
++	-I$(top_srcdir)/include \
++	-DVDDK_LIBDIR=\"$(libdir)/vmware-vix-disklib\"
+ nbdkit_vddk_plugin_la_CFLAGS = \
+-	$(WARNINGS_CFLAGS) \
+-	$(VDDK_CFLAGS)
++	$(WARNINGS_CFLAGS)
+ nbdkit_vddk_plugin_la_LIBADD = \
+-	$(VDDK_LIBS)
++	-ldl
+ nbdkit_vddk_plugin_la_LDFLAGS = \
+ 	-module -avoid-version -shared
+ 
+@@ -68,4 +69,4 @@ nbdkit-vddk-plugin.1: nbdkit-vddk-plugin.pod
+ 
+ endif
+ 
+-endif
++endif HAVE_VDDK
+diff --git a/plugins/vddk/README.VDDK b/plugins/vddk/README.VDDK
+index d8c62b1..1e56631 100644
+--- a/plugins/vddk/README.VDDK
++++ b/plugins/vddk/README.VDDK
+@@ -11,27 +11,14 @@ account and download it from:
+ This directory contains an nbdkit plugin which uses this library to
+ export VMDK files and VMware disks over NBD.
+ 
+-VDDK >= 6.5 is required.
+-
+-Note: VDDK can do NBD on its own, so nbdkit might not be needed unless
+-you want the extra features and flexibility of nbdkit.
+-
+-It is never compiled by default.  To enable it you have to do:
+-
+-  ./configure --with-vddk
+-
+-If the VDDK library is located in a non-standard location, use this
+-instead:
+-
+-  ./configure --with-vddk=/path/to/vmware-vix-disklib-distrib
+-
+-(This looks for include/ and lib{32,64}/ subdirectories of the given
+-path for header files and libraries respectively.)
++You do NOT require VDDK to compile the plugin, and the plugin does not
++contain any VMware code.  You only need VDDK at runtime.  The plugin
++uses dlopen to load the library from LD_LIBRARY_PATH (or else the
++standard shared library paths).
+ 
+ After building nbdkit-vddk-plugin.so, read the man page to find out
+-how to use it (nbdkit-vddk-plugin(1)).
+-
+-You'll probably also want to read the VDDK developer documentation.
++how to use it (nbdkit-vddk-plugin(1)).  You'll probably also want to
++read the VDDK developer documentation.
+ 
+ Bugs
+ ----
+diff --git a/plugins/vddk/nbdkit-vddk-plugin.pod b/plugins/vddk/nbdkit-vddk-plugin.pod
+index c5486a3..ba7806d 100644
+--- a/plugins/vddk/nbdkit-vddk-plugin.pod
++++ b/plugins/vddk/nbdkit-vddk-plugin.pod
+@@ -16,21 +16,41 @@ nbdkit-vddk-plugin - VMware VDDK plugin for nbdkit
+ 
+ =head1 DESCRIPTION
+ 
+-C<nbdkit-vddk-plugin> is a L<nbdkit(1)> plugin that serves files from
++C<nbdkit-vddk-plugin> is an L<nbdkit(1)> plugin that serves files from
+ local VMware VMDK files, VMware ESXi servers, VMware VCenter servers,
+-and other sources by using VMware's proprietary VDDK library.
++and other sources.  It requires VMware's proprietary VDDK library that
++you must download yourself separately.
+ 
+ The plugin can serve read-only (if the I<-r> option is used) or
+ read/write.
+ 
+-=head1 LIBRARY LOCATION
++=head1 LIBRARY AND CONFIG FILE LOCATIONS
+ 
+-If the VDDK library (C<libvixDiskLib.so>) is located on a non-standard
+-path, you may need to set C<LD_LIBRARY_PATH> or modify
+-C</etc/ld.so.conf> before this plugin will work.
++If the VDDK library (F<libvixDiskLib.so.6>) is located on a
++non-standard path, you may need to set C<LD_LIBRARY_PATH> or modify
++F</etc/ld.so.conf> before this plugin will work.  In addition you may
++want to set the C<libdir> parameter so that the VDDK library can load
++plugins like Advanced Transport.
+ 
+-The VDDK library may depend on C<libexpat.so.0> or other libraries
+-which you may have to install yourself.
++For 64 bit platforms pass the F<lib64> subdirectory:
++
++ export LD_LIBRARY_PATH=/path/to/vmware-vix-disklib-distrib/lib64
++
++For 32 bit platforms pass the F<lib32> subdirectory:
++
++ export LD_LIBRARY_PATH=/path/to/vmware-vix-disklib-distrib/lib32
++
++Then pass the VDDK distribution directory as C<libdir> along with
++other parameters as required:
++
++ nbdkit vddk \
++     libdir=/path/to/vmware-vix-disklib-distrib \
++     file=file.vmdk
++
++VDDK itself looks in a few default locations for the optional
++configuration file, usually including F</etc/vmware/config> and
++F<$HOME/.vmware/config>, but you can override this using the C<config>
++parameter.
+ 
+ =head1 PARAMETERS
+ 
+@@ -67,11 +87,14 @@ L</NOTES> below).
+ 
+ =item B<libdir=PATHNAME>
+ 
+-Optional.  This sets the path of the VMware VDDK library.  It must be
+-an absolute path.
++Optional.  This sets the path of the VMware VDDK distribution.  It
++must be an absolute path.
++
++VDDK uses this to load its own plugins, if this path is unspecified or
++wrong then VDDK will work with reduced functionality.
+ 
+ If the parameter is not given, then a hard-coded path determined at
+-compile time is used.
++compile time is used, see L</DUMP-PLUGIN OUTPUT> below.
+ 
+ =item B<nfchostport=PORT>
+ 
+@@ -307,7 +330,6 @@ support this.
+ 
+ =head1 SEE ALSO
+ 
+-L<https://github.com/libguestfs/nbdkit/blob/master/plugins/vddk/vddk.c>,
+ L<nbdkit(1)>,
+ L<nbdkit-plugin(3)>,
+ L<virsh(1)>,
+@@ -319,7 +341,7 @@ Richard W.M. Jones
+ 
+ =head1 COPYRIGHT
+ 
+-Copyright (C) 2013-2017 Red Hat Inc.
++Copyright (C) 2013-2018 Red Hat Inc.
+ 
+ =head1 LICENSE
+ 
+diff --git a/plugins/vddk/vddk-structs.h b/plugins/vddk/vddk-structs.h
+new file mode 100644
+index 0000000..3e7a3c6
+--- /dev/null
++++ b/plugins/vddk/vddk-structs.h
+@@ -0,0 +1,125 @@
++/* nbdkit
++ * Copyright (C) 2013-2018 Red Hat Inc.
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions are
++ * met:
++ *
++ * * Redistributions of source code must retain the above copyright
++ * notice, this list of conditions and the following disclaimer.
++ *
++ * * Redistributions in binary form must reproduce the above copyright
++ * notice, this list of conditions and the following disclaimer in the
++ * documentation and/or other materials provided with the distribution.
++ *
++ * * Neither the name of Red Hat nor the names of its contributors may be
++ * used to endorse or promote products derived from this software without
++ * specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY RED HAT AND CONTRIBUTORS ''AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
++ * PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL RED HAT OR
++ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
++ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
++ * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
++ * USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
++ * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
++ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
++ * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++/* Types and structs that we pass to or return from the VDDK API.
++ *
++ * Updated to VDDK 6.7
++ */
++
++#ifndef NBDKIT_VDDK_STRUCTS_H
++#define NBDKIT_VDDK_STRUCTS_H
++
++typedef uint64_t VixError;
++#define VIX_OK 0
++
++#define VIXDISKLIB_FLAG_OPEN_READ_ONLY 4
++#define VIXDISKLIB_SECTOR_SIZE 512
++
++typedef void *VixDiskLibConnection;
++typedef void *VixDiskLibHandle;
++
++typedef void VixDiskLibGenericLogFunc (const char *fmt, va_list args);
++
++enum VixDiskLibCredType {
++  VIXDISKLIB_CRED_UID       = 1,
++  VIXDISKLIB_CRED_SESSIONID = 2,
++  VIXDISKLIB_CRED_TICKETID  = 3,
++  VIXDISKLIB_CRED_SSPI      = 4,
++  VIXDISKLIB_CRED_UNKNOWN   = 256
++};
++
++enum VixDiskLibSpecType {
++  VIXDISKLIB_SPEC_VMX             = 0,
++  VIXDISKLIB_SPEC_VSTORAGE_OBJECT = 1,
++  VIXDISKLIB_SPEC_UNKNOWN         = 2
++};
++
++struct VixDiskLibVStorageObjectSpec {
++  char *id;
++  char *datastoreMoRef;
++  char *ssId;
++};
++
++typedef struct VixDiskLibConnectParams {
++  char *vmxSpec;
++  char *serverName;
++  char *thumbPrint;
++  long reserved1;
++  enum VixDiskLibCredType credType;
++  union {
++    struct {
++      char *userName;
++      char *password;
++    } uid;
++    struct {
++      char *cookie;
++      char *userName;
++      char *key;
++    } sessionId;
++    void *reserved2;
++  } creds;
++  uint32_t port;
++  uint32_t nfcHostPort;
++  char *reserved3;
++  char reserved4[8];
++  void *reserved5;
++  union {
++    struct VixDiskLibVStorageObjectSpec vStorageObjSpec;
++  } spec;
++  enum VixDiskLibSpecType specType;
++} VixDiskLibConnectParams;
++
++struct VixDiskLibGeometry {
++  uint32_t cylinders;
++  uint32_t heads;
++  uint32_t sectors;
++};
++
++enum VixDiskLibAdapterType {
++  VIXDISKLIB_ADAPTER_IDE           = 1,
++  VIXDISKLIB_ADAPTER_SCSI_BUSLOGIC = 2,
++  VIXDISKLIB_ADAPTER_SCSI_LSILOGIC = 3,
++  VIXDISKLIB_ADAPTER_UNKNOWN       = 256
++};
++
++typedef struct VixDiskLibInfo {
++  struct VixDiskLibGeometry biosGeo;
++  struct VixDiskLibGeometry physGeo;
++  uint64_t capacity;
++  enum VixDiskLibAdapterType adapterType;
++  int numLinks;
++  char *parentFileNameHint;
++  char *uuid;
++} VixDiskLibInfo;
++
++#endif /* NBDKIT_VDDK_STRUCTS_H */
+diff --git a/plugins/vddk/vddk.c b/plugins/vddk/vddk.c
+index d7a4987..e3190cd 100644
+--- a/plugins/vddk/vddk.c
++++ b/plugins/vddk/vddk.c
+@@ -39,14 +39,36 @@
+ #include <inttypes.h>
+ #include <string.h>
+ #include <unistd.h>
++#include <dlfcn.h>
+ 
+ #include <nbdkit-plugin.h>
+ 
+-#include <vixDiskLib.h>
++#include "vddk-structs.h"
+ 
++/* The VDDK APIs that we call.  These globals are initialized when the
++ * plugin is loaded (by vddk_load).
++ */
++char *(*VixDiskLib_GetErrorText) (VixError err, const char *unused);
++void (*VixDiskLib_FreeErrorText) (char *text);
++VixError (*VixDiskLib_InitEx) (uint32_t major, uint32_t minor, VixDiskLibGenericLogFunc *log_function, VixDiskLibGenericLogFunc *warn_function, VixDiskLibGenericLogFunc *panic_function, const char *lib_dir, const char *config_file);
++void (*VixDiskLib_Exit) (void);
++VixError (*VixDiskLib_ConnectEx) (const VixDiskLibConnectParams *params, char read_only, const char *snapshot_ref, const char *transport_modes, VixDiskLibConnection *connection);
++VixError (*VixDiskLib_Open) (const VixDiskLibConnection connection, const char *path, uint32_t flags, VixDiskLibHandle *handle);
++const char *(*VixDiskLib_GetTransportMode) (VixDiskLibHandle handle);
++VixError (*VixDiskLib_Close) (VixDiskLibHandle handle);
++VixError (*VixDiskLib_Disconnect) (VixDiskLibConnection connection);
++VixError (*VixDiskLib_GetInfo) (VixDiskLibHandle handle, VixDiskLibInfo **info);
++void (*VixDiskLib_FreeInfo) (VixDiskLibInfo *info);
++VixError (*VixDiskLib_Read) (VixDiskLibHandle handle, uint64_t start_sector, uint64_t nr_sectors, unsigned char *buf);
++VixError (*VixDiskLib_Write) (VixDiskLibHandle handle, uint64_t start_sector, uint64_t nr_sectors, const unsigned char *buf);
++
++/* Parameters passed to InitEx. */
+ #define VDDK_MAJOR 5
+ #define VDDK_MINOR 1
+ 
++static void *dl = NULL;                    /* dlopen handle */
++static int init_called = 0;                /* was InitEx called */
++
+ static char *config = NULL;                /* config */
+ static const char *cookie = NULL;          /* cookie */
+ static const char *filename = NULL;        /* file */
+@@ -120,27 +142,39 @@ error_function (const char *fs, va_list args)
+ static void
+ vddk_load (void)
+ {
+-  VixError err;
++  const char *soname = "libvixDiskLib.so.6";
+ 
+-  DEBUG_CALL ("VixDiskLib_InitEx",
+-              "%d, %d, &debug_fn, &error_fn, &error_fn, %s, %s",
+-              VDDK_MAJOR, VDDK_MINOR, libdir, config ? : "NULL");
+-  err = VixDiskLib_InitEx (VDDK_MAJOR, VDDK_MINOR,
+-                           &debug_function, /* log function */
+-                           &error_function, /* warn function */
+-                           &error_function, /* panic function */
+-                           libdir, config);
+-  if (err != VIX_OK) {
+-    VDDK_ERROR (err, "VixDiskLib_InitEx");
++  /* Load the plugin and set the entry points. */
++  dl = dlopen (soname, RTLD_NOW);
++  if (dl == NULL) {
++    nbdkit_error ("%s: %s", soname, dlerror ());
+     exit (EXIT_FAILURE);
+   }
++
++  VixDiskLib_GetErrorText = dlsym (dl, "VixDiskLib_GetErrorText");
++  VixDiskLib_FreeErrorText = dlsym (dl, "VixDiskLib_FreeErrorText");
++  VixDiskLib_InitEx = dlsym (dl, "VixDiskLib_InitEx");
++  VixDiskLib_Exit = dlsym (dl, "VixDiskLib_Exit");
++  VixDiskLib_ConnectEx = dlsym (dl, "VixDiskLib_ConnectEx");
++  VixDiskLib_Open = dlsym (dl, "VixDiskLib_Open");
++  VixDiskLib_GetTransportMode = dlsym (dl, "VixDiskLib_GetTransportMode");
++  VixDiskLib_Close = dlsym (dl, "VixDiskLib_Close");
++  VixDiskLib_Disconnect = dlsym (dl, "VixDiskLib_Disconnect");
++  VixDiskLib_GetInfo = dlsym (dl, "VixDiskLib_GetInfo");
++  VixDiskLib_FreeInfo = dlsym (dl, "VixDiskLib_FreeInfo");
++  VixDiskLib_Read = dlsym (dl, "VixDiskLib_Read");
++  VixDiskLib_Write = dlsym (dl, "VixDiskLib_Write");
+ }
+ 
+ static void
+ vddk_unload (void)
+ {
+-  DEBUG_CALL ("VixDiskLib_Exit", "");
+-  VixDiskLib_Exit ();
++  if (init_called) {
++    DEBUG_CALL ("VixDiskLib_Exit", "");
++    VixDiskLib_Exit ();
++  }
++  if (dl)
++    dlclose (dl);
+   free (config);
+   free (password);
+ }
+@@ -170,15 +204,10 @@ vddk_config (const char *key, const char *value)
+     libdir = value;
+   }
+   else if (strcmp (key, "nfchostport") == 0) {
+-#if HAVE_VIXDISKLIBCONNECTPARAMS_NFCHOSTPORT
+     if (sscanf (value, "%d", &nfc_host_port) != 1) {
+       nbdkit_error ("cannot parse nfchostport: %s", value);
+       return -1;
+     }
+-#else
+-    nbdkit_error ("this version of VDDK is too old to support nfchostpost");
+-    return -1;
+-#endif
+   }
+   else if (strcmp (key, "password") == 0) {
+     free (password);
+@@ -223,6 +252,8 @@ vddk_config (const char *key, const char *value)
+ static int
+ vddk_config_complete (void)
+ {
++  VixError err;
++
+   if (filename == NULL) {
+     nbdkit_error ("you must supply the file=<FILENAME> parameter after the plugin name on the command line");
+     return -1;
+@@ -258,6 +289,21 @@ vddk_config_complete (void)
+ #undef missing
+   }
+ 
++  /* Initialize VDDK library. */
++  DEBUG_CALL ("VixDiskLib_InitEx",
++              "%d, %d, &debug_fn, &error_fn, &error_fn, %s, %s",
++              VDDK_MAJOR, VDDK_MINOR, libdir, config ? : "NULL");
++  err = VixDiskLib_InitEx (VDDK_MAJOR, VDDK_MINOR,
++                           &debug_function, /* log function */
++                           &error_function, /* warn function */
++                           &error_function, /* panic function */
++                           libdir, config);
++  if (err != VIX_OK) {
++    VDDK_ERROR (err, "VixDiskLib_InitEx");
++    exit (EXIT_FAILURE);
++  }
++  init_called = 1;
++
+   return 0;
+ }
+ 
+@@ -269,10 +315,7 @@ static void
+ vddk_dump_plugin (void)
+ {
+   printf ("vddk_default_libdir=%s\n", VDDK_LIBDIR);
+-
+-#if HAVE_VIXDISKLIBCONNECTPARAMS_NFCHOSTPORT
+   printf ("vddk_has_nfchostport=1\n");
+-#endif
+ 
+   /* XXX We really need to print the version of the dynamically
+    * linked library here, but VDDK does not provide it.
+@@ -323,9 +366,7 @@ vddk_open (int readonly)
+     }
+     params.thumbPrint = (char *) thumb_print;
+     params.port = port;
+-#if HAVE_VIXDISKLIBCONNECTPARAMS_NFCHOSTPORT
+     params.nfcHostPort = nfc_host_port;
+-#endif
+   }
+ 
+   /* XXX Some documentation suggests we should call
+-- 
+2.18.0
+

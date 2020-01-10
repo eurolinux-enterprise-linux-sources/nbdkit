@@ -1,0 +1,33 @@
+From 033ab68ec56dbdac091b084dee7b7f333290768a Mon Sep 17 00:00:00 2001
+From: "Richard W.M. Jones" <rjones@redhat.com>
+Date: Wed, 25 Jul 2018 14:02:32 +0100
+Subject: [PATCH 7/8] vddk: Two more static dlsym variables.
+
+Fixes commit 168364eff47004e64d0880516de5744fecaa8047
+and commit 8d7f7c26eb435334d7fa35e84ceee7d266dfae4c.
+
+(cherry picked from commit b776d1f5e59faef659f0d6e7fbffec614d58a368)
+---
+ plugins/vddk/vddk.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/plugins/vddk/vddk.c b/plugins/vddk/vddk.c
+index 5d7bf6d..29b48dd 100644
+--- a/plugins/vddk/vddk.c
++++ b/plugins/vddk/vddk.c
+@@ -51,10 +51,10 @@
+ static char *(*VixDiskLib_GetErrorText) (VixError err, const char *unused);
+ static void (*VixDiskLib_FreeErrorText) (char *text);
+ static VixError (*VixDiskLib_InitEx) (uint32_t major, uint32_t minor, VixDiskLibGenericLogFunc *log_function, VixDiskLibGenericLogFunc *warn_function, VixDiskLibGenericLogFunc *panic_function, const char *lib_dir, const char *config_file);
+-void (*VixDiskLib_Exit) (void);
++static void (*VixDiskLib_Exit) (void);
+ static VixError (*VixDiskLib_ConnectEx) (const VixDiskLibConnectParams *params, char read_only, const char *snapshot_ref, const char *transport_modes, VixDiskLibConnection *connection);
+ static VixError (*VixDiskLib_Open) (const VixDiskLibConnection connection, const char *path, uint32_t flags, VixDiskLibHandle *handle);
+-const char *(*VixDiskLib_GetTransportMode) (VixDiskLibHandle handle);
++static const char *(*VixDiskLib_GetTransportMode) (VixDiskLibHandle handle);
+ static VixError (*VixDiskLib_Close) (VixDiskLibHandle handle);
+ static VixError (*VixDiskLib_Disconnect) (VixDiskLibConnection connection);
+ static VixError (*VixDiskLib_GetInfo) (VixDiskLibHandle handle, VixDiskLibInfo **info);
+-- 
+2.18.0
+
