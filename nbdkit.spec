@@ -27,7 +27,7 @@
 
 Name:           nbdkit
 Version:        1.2.6
-Release:        1%{?dist}
+Release:        1%{?dist}.2
 Summary:        NBD server
 
 License:        BSD
@@ -50,6 +50,7 @@ Patch5:        0005-vddk-Improve-error-message-if-the-proprietary-librar.patch
 Patch6:        0006-vddk-If-relative-libdir-parameter-is-passed-make-it-.patch
 Patch7:        0007-vddk-Two-more-static-dlsym-variables.patch
 Patch8:        0008-vddk-Add-a-very-simple-test.patch
+Patch9:        0009-python-Try-harder-to-print-the-full-traceback-on-err.patch
 
 %if 0%{patches_touch_autotools}
 BuildRequires: autoconf, automake, libtool
@@ -272,7 +273,7 @@ copy="$(mktemp -d)"
 cp -a . "$copy"
 mv "$copy" python3
 
-%configure --disable-static --with-tls-priority=@NBDKIT,SYSTEM \
+%configure --disable-static --with-tls-priority=NORMAL \
 	--disable-perl \
 	--disable-ocaml \
 	--disable-ruby \
@@ -408,6 +409,13 @@ make check -j1 || {
 
 
 %changelog
+* Thu Nov 08 2018 Richard W.M. Jones <rjones@redhat.com> - 1.2.6-1.el7_6.2
+- Enhanced Python error reporting.
+  resolves: rhbz#1613946
+
+* Fri Oct 12 2018 Pino Toscano <ptoscano@redhat.com> - 1.2.6-1.el7_6.1
+- Fix TLS priority. (RHBZ#1632220)
+
 * Wed Aug  1 2018 Richard W.M. Jones <rjones@redhat.com> - 1.2.6-1
 - New stable version 1.2.6.
 
